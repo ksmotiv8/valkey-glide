@@ -274,6 +274,11 @@ static NEXT_POOL_ID: AtomicU64 = AtomicU64::new(1);
 /// Global client_id allocator — ensures uniqueness across all pools.
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Allocate a globally unique client_id (can be called without holding a pool lock).
+pub fn allocate_client_id() -> u64 {
+    NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 pub fn get_pool_registry() -> &'static DashMap<u64, Arc<TokioMutex<ClientPool>>> {
     POOL_REGISTRY.get_or_init(DashMap::new)
 }

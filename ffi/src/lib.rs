@@ -5399,7 +5399,8 @@ pub unsafe extern "C" fn glide_pool_create(
             let pool_clone = pool_arc.clone();
             let bytes = connection_request.clone();
             std::thread::spawn(move || {
-                match create_pool_client(&bytes, ClientType::SyncClient, 0) {
+                let pre_cid = glide_core::pool::allocate_client_id() as usize;
+                match create_pool_client(&bytes, ClientType::SyncClient, pre_cid) {
                     Ok((adapter_ptr, client)) => {
                         let rt = get_pool_runtime();
                         rt.block_on(async {
@@ -5407,7 +5408,7 @@ pub unsafe extern "C" fn glide_pool_create(
                             if pool.state.load(AtomicOrdering::Acquire) != POOL_RUNNING {
                                 return;
                             }
-                            let client_id = pool.next_id();
+                            let client_id = pre_cid as u64;
                             let entry = PooledClient {
                                 client_id,
                                 client: client.clone(),
@@ -5496,6 +5497,7 @@ pub unsafe extern "C" fn glide_pool_create_async(
             let bytes = connection_request.clone();
             let sc = success_callback;
             let fc = failure_callback;
+            let pre_cid = glide_core::pool::allocate_client_id() as usize;
             std::thread::spawn(move || {
                 match create_pool_client(
                     &bytes,
@@ -5504,7 +5506,7 @@ pub unsafe extern "C" fn glide_pool_create_async(
                         failure_callback: fc,
                         allow_stack_response: false,
                     },
-                    0,
+                    pre_cid,
                 ) {
                     Ok((adapter_ptr, client)) => {
                         let rt = get_pool_runtime();
@@ -5513,7 +5515,7 @@ pub unsafe extern "C" fn glide_pool_create_async(
                             if pool.state.load(AtomicOrdering::Acquire) != POOL_RUNNING {
                                 return;
                             }
-                            let client_id = pool.next_id();
+                            let client_id = pre_cid as u64;
                             let entry = PooledClient {
                                 client_id,
                                 client: client.clone(),
@@ -5574,7 +5576,8 @@ pub extern "C" fn glide_pool_try_acquire(pool_id: u64) -> i64 {
                 let bytes = pool.config.connection_request.clone();
                 drop(pool);
                 std::thread::spawn(move || {
-                    match create_pool_client(&bytes, ClientType::SyncClient, 0) {
+                    let pre_cid = glide_core::pool::allocate_client_id() as usize;
+                    match create_pool_client(&bytes, ClientType::SyncClient, pre_cid) {
                         Ok((adapter_ptr, client)) => {
                             let rt = get_pool_runtime();
                             rt.block_on(async {
@@ -5583,7 +5586,7 @@ pub extern "C" fn glide_pool_try_acquire(pool_id: u64) -> i64 {
                                     pool.total_count.fetch_sub(1, AtomicOrdering::AcqRel);
                                     return;
                                 }
-                                let client_id = pool.next_id();
+                                let client_id = pre_cid as u64;
                                 let entry = PooledClient {
                                     client_id,
                                     client: client.clone(),
@@ -5665,7 +5668,8 @@ pub extern "C" fn glide_pool_acquire_blocking(pool_id: u64, timeout_ms: u64) -> 
                             let bytes = pool.config.connection_request.clone();
                             drop(pool);
                             std::thread::spawn(move || {
-                                match create_pool_client(&bytes, ClientType::SyncClient, 0) {
+                                let pre_cid = glide_core::pool::allocate_client_id() as usize;
+                                match create_pool_client(&bytes, ClientType::SyncClient, pre_cid) {
                                     Ok((adapter_ptr, client)) => {
                                         let rt = get_pool_runtime();
                                         rt.block_on(async {
