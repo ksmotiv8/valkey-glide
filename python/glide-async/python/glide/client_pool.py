@@ -53,6 +53,10 @@ class PoolConfig:
     acquire_timeout_s: float = 5.0
     """Maximum time to wait when pool is exhausted (seconds)."""
 
+    test_on_borrow: bool = False
+    """Send PING when acquiring a client to verify connection health.
+    Adds one round-trip per acquire but catches stale/broken connections early."""
+
 
 class AsyncClientPool:
     """
@@ -124,6 +128,20 @@ class AsyncClientPool:
             # Try to pop from idle
             if self._idle:
                 client = self._idle.pop()  # LIFO
+
+                # Health check if configured
+                if self._pool_config.test_on_borrow:
+                    try:
+                        await asyncio.wait_for(client.ping(), timeout=2.0)
+                    except Exception:
+                        # Connection is dead — discard and try next
+                        self._total -= 1
+                        try:
+                            client.close()
+                        except Exception:
+                            pass
+                        continue
+
                 self._in_use.add(id(client))
                 return client
 

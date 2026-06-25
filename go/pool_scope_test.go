@@ -214,6 +214,21 @@ func TestScopeGetSet(t *testing.T) {
 	client.Del(ctx, []string{key})
 }
 
+func TestScopeReturnsEmptyForMissingKey(t *testing.T) {
+	client, err := NewClient(standaloneConfig())
+	require.NoError(t, err)
+	defer client.Close()
+
+	ctx := context.Background()
+	scope, err := client.ScopedConnection(ctx, 10*time.Second)
+	require.NoError(t, err)
+	defer scope.Close()
+
+	val, err := scope.Get(ctx, fmt.Sprintf("nonexistent-%d", time.Now().UnixNano()))
+	require.NoError(t, err)
+	assert.Equal(t, "", val) // Nil response → empty string
+}
+
 func TestScopeWatchMultiExec(t *testing.T) {
 	client, err := NewClient(standaloneConfig())
 	require.NoError(t, err)
