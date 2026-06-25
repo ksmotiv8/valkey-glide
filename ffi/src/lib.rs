@@ -5322,60 +5322,33 @@ fn get_pool_clients() -> &'static dashmap::DashMap<u64, PoolClientEntry> {
 
 /// Create a GlideClient + ClientAdapter for the pool.
 /// Runs on a dedicated thread (not inside an existing runtime) to avoid nesting.
-fn create_pool_client_sync(
+/// Create a pool client using the standard create_client_internal path.
+/// This ensures full feature parity: pipe integration, cluster support, pubsub, etc.
+///
+/// For sync pools: creates a SyncClient adapter.
+/// For async pools: creates an AsyncClient adapter with callbacks.
+fn create_pool_client(
     connection_request_bytes: &[u8],
+    client_type: ClientType,
+    client_id: usize,
 ) -> Result<(usize, glide_core::client::Client), String> {
-    // Each pooled client gets a lightweight current_thread runtime for block_on,
-    // but shares the global POOL_RUNTIME for background I/O (connection drivers,
-    // reconnection). This avoids creating N OS threads for N pooled clients.
-    let main_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("Runtime creation failed: {}", e))?;
+    let adapter_ptr = create_client_internal(
+        connection_request_bytes,
+        client_type,
+        None, // no pubsub callback for pooled clients (managed at pool level)
+        None, // no address resolver (uses the one in ConnectionRequest if any)
+        client_id,
+    )?;
 
-    let shared_bg = get_pool_runtime();
-
-    // Create client on the shared background runtime
-    let client = {
-        let _guard = shared_bg.enter();
-        shared_bg.block_on(async {
-            let proto = glide_core::connection_request::ConnectionRequest::parse_from_bytes(
-                connection_request_bytes,
-            )
-            .map_err(|e| format!("Protobuf parse error: {}", e))?;
-            let req = glide_core::client::ConnectionRequest::from(proto);
-            glide_core::client::Client::new(req, None)
-                .await
-                .map_err(|e| format!("Client creation failed: {}", e))
-        })?
+    // Extract the Client from the adapter for pool bookkeeping
+    let adapter = unsafe {
+        Arc::increment_strong_count(adapter_ptr);
+        Arc::from_raw(adapter_ptr)
     };
-
-    // Build ClientAdapter: current_thread for block_on, shared bg for I/O.
-    // Note: background_runtime is None — the shared POOL_RUNTIME handles
-    // spawned tasks. The SyncClient execute_request enters the bg context
-    // via the pool runtime handle stored separately.
-    let core = Arc::new(CommandExecutionCore {
-        client: client.clone(),
-        client_type: ClientType::SyncClient,
-    });
-    // For sync dispatch to work correctly, we need a background_runtime ref
-    // so execute_request can enter its context during block_on.
-    // Use a minimal single-threaded runtime as the background context.
-    let bg_wrapper = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(1)
-        .thread_name("glide-pool-bg")
-        .build()
-        .ok(); // Fallback: if this fails, sync dispatch still works without bg context
-
-    let adapter = Arc::new(ClientAdapter {
-        runtime: main_runtime,
-        pipe_client_id: std::sync::atomic::AtomicU64::new(0),
-        background_runtime: bg_wrapper,
-        core,
-        pubsub_callback: Arc::new(std::sync::RwLock::new(None)),
-    });
-    let ptr = Arc::into_raw(adapter) as usize;
+    let client = adapter.core.client.clone();
+    let ptr = adapter_ptr as usize;
+    // Don't drop — the Arc is owned by the pool now
+    std::mem::forget(adapter);
 
     Ok((ptr, client))
 }
@@ -5426,7 +5399,7 @@ pub unsafe extern "C" fn glide_pool_create(
             let pool_clone = pool_arc.clone();
             let bytes = connection_request.clone();
             std::thread::spawn(move || {
-                match create_pool_client_sync(&bytes) {
+                match create_pool_client(&bytes, ClientType::SyncClient, 0) {
                     Ok((adapter_ptr, client)) => {
                         let rt = get_pool_runtime();
                         rt.block_on(async {
@@ -5523,98 +5496,56 @@ pub unsafe extern "C" fn glide_pool_create_async(
             let bytes = connection_request.clone();
             let sc = success_callback;
             let fc = failure_callback;
-            std::thread::spawn(move || match create_pool_client_async(&bytes, sc, fc) {
-                Ok((adapter_ptr, client)) => {
-                    let rt = get_pool_runtime();
-                    rt.block_on(async {
-                        let mut pool = pool_clone.lock().await;
-                        if pool.state.load(AtomicOrdering::Acquire) != POOL_RUNNING {
-                            return;
-                        }
-                        let client_id = pool.next_id();
-                        let entry = PooledClient {
-                            client_id,
-                            client: client.clone(),
-                            created_at: std::time::Instant::now(),
-                            last_idle_at: std::time::Instant::now(),
-                            borrowed_at: None,
-                            state: ClientState::Idle,
-                        };
-                        pool.idle.push_back(entry);
-                        pool.total_count.fetch_add(1, AtomicOrdering::AcqRel);
-                        get_pool_clients().insert(
-                            client_id,
-                            PoolClientEntry {
-                                adapter_ptr,
-                                client,
+            std::thread::spawn(move || {
+                match create_pool_client(
+                    &bytes,
+                    ClientType::AsyncClient {
+                        success_callback: sc,
+                        failure_callback: fc,
+                        allow_stack_response: false,
+                    },
+                    0,
+                ) {
+                    Ok((adapter_ptr, client)) => {
+                        let rt = get_pool_runtime();
+                        rt.block_on(async {
+                            let mut pool = pool_clone.lock().await;
+                            if pool.state.load(AtomicOrdering::Acquire) != POOL_RUNNING {
+                                return;
+                            }
+                            let client_id = pool.next_id();
+                            let entry = PooledClient {
+                                client_id,
+                                client: client.clone(),
                                 created_at: std::time::Instant::now(),
-                            },
+                                last_idle_at: std::time::Instant::now(),
+                                borrowed_at: None,
+                                state: ClientState::Idle,
+                            };
+                            pool.idle.push_back(entry);
+                            pool.total_count.fetch_add(1, AtomicOrdering::AcqRel);
+                            get_pool_clients().insert(
+                                client_id,
+                                PoolClientEntry {
+                                    adapter_ptr,
+                                    client,
+                                    created_at: std::time::Instant::now(),
+                                },
+                            );
+                        });
+                    }
+                    Err(e) => {
+                        logger_core::log_error_lazy!(
+                            "pool",
+                            format!("Background async client creation failed: {}", e)
                         );
-                    });
-                }
-                Err(e) => {
-                    logger_core::log_error_lazy!(
-                        "pool",
-                        format!("Background async client creation failed: {}", e)
-                    );
+                    }
                 }
             });
         }
     }
 
     pool_id as i64
-}
-
-/// Create a GlideClient + AsyncClient ClientAdapter for the pool.
-fn create_pool_client_async(
-    connection_request_bytes: &[u8],
-    success_callback: SuccessCallback,
-    failure_callback: FailureCallback,
-) -> Result<(usize, glide_core::client::Client), String> {
-    let shared_bg = get_pool_runtime();
-
-    // Create the multi_thread runtime for async dispatch
-    let runtime = Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(1)
-        .thread_name("glide-pool-async")
-        .build()
-        .map_err(|e| format!("Runtime creation failed: {}", e))?;
-
-    // Create client on the shared background runtime
-    let client = {
-        let _guard = shared_bg.enter();
-        shared_bg.block_on(async {
-            let proto = glide_core::connection_request::ConnectionRequest::parse_from_bytes(
-                connection_request_bytes,
-            )
-            .map_err(|e| format!("Protobuf parse error: {}", e))?;
-            let req = glide_core::client::ConnectionRequest::from(proto);
-            glide_core::client::Client::new(req, None)
-                .await
-                .map_err(|e| format!("Client creation failed: {}", e))
-        })?
-    };
-
-    let core = Arc::new(CommandExecutionCore {
-        client: client.clone(),
-        client_type: ClientType::AsyncClient {
-            success_callback,
-            failure_callback,
-            allow_stack_response: false,
-        },
-    });
-
-    let adapter = Arc::new(ClientAdapter {
-        runtime,
-        pipe_client_id: std::sync::atomic::AtomicU64::new(0),
-        background_runtime: None,
-        core,
-        pubsub_callback: Arc::new(std::sync::RwLock::new(None)),
-    });
-    let ptr = Arc::into_raw(adapter) as usize;
-
-    Ok((ptr, client))
 }
 
 /// Non-blocking acquire. Returns client_id >= 0, -1 if exhausted, -2 if invalid pool.
@@ -5642,45 +5573,47 @@ pub extern "C" fn glide_pool_try_acquire(pool_id: u64) -> i64 {
                 let pool_clone = pool_arc.clone();
                 let bytes = pool.config.connection_request.clone();
                 drop(pool);
-                std::thread::spawn(move || match create_pool_client_sync(&bytes) {
-                    Ok((adapter_ptr, client)) => {
-                        let rt = get_pool_runtime();
-                        rt.block_on(async {
-                            let mut pool = pool_clone.lock().await;
-                            if pool.state.load(AtomicOrdering::Acquire) != POOL_RUNNING {
-                                pool.total_count.fetch_sub(1, AtomicOrdering::AcqRel);
-                                return;
-                            }
-                            let client_id = pool.next_id();
-                            let entry = PooledClient {
-                                client_id,
-                                client: client.clone(),
-                                created_at: std::time::Instant::now(),
-                                last_idle_at: std::time::Instant::now(),
-                                borrowed_at: None,
-                                state: ClientState::Idle,
-                            };
-                            pool.idle.push_back(entry);
-                            get_pool_clients().insert(
-                                client_id,
-                                PoolClientEntry {
-                                    adapter_ptr,
-                                    client,
+                std::thread::spawn(move || {
+                    match create_pool_client(&bytes, ClientType::SyncClient, 0) {
+                        Ok((adapter_ptr, client)) => {
+                            let rt = get_pool_runtime();
+                            rt.block_on(async {
+                                let mut pool = pool_clone.lock().await;
+                                if pool.state.load(AtomicOrdering::Acquire) != POOL_RUNNING {
+                                    pool.total_count.fetch_sub(1, AtomicOrdering::AcqRel);
+                                    return;
+                                }
+                                let client_id = pool.next_id();
+                                let entry = PooledClient {
+                                    client_id,
+                                    client: client.clone(),
                                     created_at: std::time::Instant::now(),
-                                },
+                                    last_idle_at: std::time::Instant::now(),
+                                    borrowed_at: None,
+                                    state: ClientState::Idle,
+                                };
+                                pool.idle.push_back(entry);
+                                get_pool_clients().insert(
+                                    client_id,
+                                    PoolClientEntry {
+                                        adapter_ptr,
+                                        client,
+                                        created_at: std::time::Instant::now(),
+                                    },
+                                );
+                            });
+                        }
+                        Err(e) => {
+                            logger_core::log_error_lazy!(
+                                "pool",
+                                format!("Background creation failed: {}", e)
                             );
-                        });
-                    }
-                    Err(e) => {
-                        logger_core::log_error_lazy!(
-                            "pool",
-                            format!("Background creation failed: {}", e)
-                        );
-                        let rt = get_pool_runtime();
-                        rt.block_on(async {
-                            let pool = pool_clone.lock().await;
-                            pool.total_count.fetch_sub(1, AtomicOrdering::AcqRel);
-                        });
+                            let rt = get_pool_runtime();
+                            rt.block_on(async {
+                                let pool = pool_clone.lock().await;
+                                pool.total_count.fetch_sub(1, AtomicOrdering::AcqRel);
+                            });
+                        }
                     }
                 });
             }
@@ -5732,7 +5665,7 @@ pub extern "C" fn glide_pool_acquire_blocking(pool_id: u64, timeout_ms: u64) -> 
                             let bytes = pool.config.connection_request.clone();
                             drop(pool);
                             std::thread::spawn(move || {
-                                match create_pool_client_sync(&bytes) {
+                                match create_pool_client(&bytes, ClientType::SyncClient, 0) {
                                     Ok((adapter_ptr, client)) => {
                                         let rt = get_pool_runtime();
                                         rt.block_on(async {
@@ -5860,7 +5793,7 @@ pub extern "C" fn glide_pool_set_pipe_client_id(client_id: u64, pipe_client_id: 
         None => return -1,
     };
 
-    // Safety: adapter_ptr was created via Arc::into_raw in create_pool_client_async.
+    // Safety: adapter_ptr was created via Arc::into_raw in create_pool_client.
     unsafe {
         Arc::increment_strong_count(adapter_ptr as *const ClientAdapter);
         let adapter = Arc::from_raw(adapter_ptr as *const ClientAdapter);
