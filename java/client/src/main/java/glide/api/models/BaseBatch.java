@@ -244,11 +244,7 @@ import static glide.utils.ArrayTransformUtils.flattenMapToGlideStringArrayValueF
 import static glide.utils.ArrayTransformUtils.flattenNestedArrayToGlideStringArray;
 import static glide.utils.ArrayTransformUtils.mapGeoDataToGlideStringArray;
 
-import command_request.CommandRequestOuterClass.Batch;
-import command_request.CommandRequestOuterClass.Command;
-import command_request.CommandRequestOuterClass.Command.ArgsArray;
 import command_request.CommandRequestOuterClass.RequestType;
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import glide.api.commands.StringBaseCommands;
 import glide.api.models.commands.ClientPauseMode;
 import glide.api.models.commands.ExpireOptions;
@@ -326,8 +322,9 @@ import glide.api.models.commands.stream.StreamReadGroupOptions;
 import glide.api.models.commands.stream.StreamReadOptions;
 import glide.api.models.commands.stream.StreamTrimOptions;
 import glide.api.models.configuration.ReadFrom;
-import glide.managers.CommandManager;
 import glide.utils.ArgsBuilder;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import lombok.NonNull;
 
@@ -347,8 +344,11 @@ import lombok.NonNull;
  * @param <T> child typing for chaining method calls.
  */
 public abstract class BaseBatch<T extends BaseBatch<T>> {
-    /** Command class to send a single request to Valkey. */
-    protected final Batch.Builder protobufBatch;
+    /** Accumulated commands in this batch. */
+    protected final ArrayList<BatchCommand> commands = new ArrayList<>();
+
+    /** Whether this batch is atomic (transaction) or a pipeline. */
+    protected final boolean isAtomic;
 
     /**
      * Flag whether batch commands may return binary data.<br>
@@ -357,15 +357,14 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     protected boolean binaryOutput = false;
 
-    /**
-     * Returns the protobuf batch builder. Batch builder is intentionally mutable for command
-     * assembly.
-     */
-    @SuppressFBWarnings(
-            value = "EI_EXPOSE_REP",
-            justification = "Batch builder is intentionally mutable for command assembly")
-    public Batch.Builder getProtobufBatch() {
-        return protobufBatch;
+    /** Returns the list of accumulated batch commands. */
+    public List<BatchCommand> getCommands() {
+        return commands;
+    }
+
+    /** Returns whether this batch is atomic (transaction). */
+    public boolean isAtomic() {
+        return isAtomic;
     }
 
     /** Returns whether batch commands may return binary data. */
@@ -380,7 +379,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     }
 
     protected BaseBatch(boolean isAtomic) {
-        this.protobufBatch = Batch.newBuilder().setIsAtomic(isAtomic);
+        this.isAtomic = isAtomic;
     }
 
     protected abstract T getThis();
@@ -398,7 +397,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T customCommand(ArgType[] args) {
         checkTypeOrThrow(args);
-        protobufBatch.addCommands(buildCommand(CustomCommand, newArgsBuilder().add(args)));
+        addCommand(CustomCommand, newArgsBuilder().add(args));
         return getThis();
     }
 
@@ -413,7 +412,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T echo(@NonNull ArgType message) {
         checkTypeOrThrow(message);
-        protobufBatch.addCommands(buildCommand(Echo, newArgsBuilder().add(message)));
+        addCommand(Echo, newArgsBuilder().add(message));
         return getThis();
     }
 
@@ -424,7 +423,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - A response from the server with a <code>String</code>.
      */
     public T ping() {
-        protobufBatch.addCommands(buildCommand(Ping));
+        addCommand(Ping);
         return getThis();
     }
 
@@ -435,7 +434,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - A response from the server with a <code>String</code>.
      */
     public T reset() {
-        protobufBatch.addCommands(buildCommand(Reset));
+        addCommand(Reset);
         return getThis();
     }
 
@@ -450,7 +449,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T ping(@NonNull ArgType msg) {
         checkTypeOrThrow(msg);
-        protobufBatch.addCommands(buildCommand(Ping, newArgsBuilder().add(msg)));
+        addCommand(Ping, newArgsBuilder().add(msg));
         return getThis();
     }
 
@@ -461,7 +460,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - A <code>String</code> with server info.
      */
     public T info() {
-        protobufBatch.addCommands(buildCommand(Info));
+        addCommand(Info);
         return getThis();
     }
 
@@ -475,7 +474,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - A <code>String</code> containing the requested {@link Section}s.
      */
     public T info(@NonNull Section[] sections) {
-        protobufBatch.addCommands(buildCommand(Info, newArgsBuilder().add(sections)));
+        addCommand(Info, newArgsBuilder().add(sections));
         return getThis();
     }
 
@@ -491,7 +490,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T del(@NonNull ArgType[] keys) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(buildCommand(Del, newArgsBuilder().add(keys)));
+        addCommand(Del, newArgsBuilder().add(keys));
         return getThis();
     }
 
@@ -508,7 +507,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T get(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(Get, newArgsBuilder().add(key)));
+        addCommand(Get, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -524,7 +523,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T getdel(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(GetDel, newArgsBuilder().add(key)));
+        addCommand(GetDel, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -541,7 +540,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T getex(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(GetEx, newArgsBuilder().add(key)));
+        addCommand(GetEx, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -559,7 +558,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T getex(@NonNull ArgType key, @NonNull GetExOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(GetEx, newArgsBuilder().add(key).add(options.toArgs())));
+        addCommand(GetEx, newArgsBuilder().add(key).add(options.toArgs()));
         return getThis();
     }
 
@@ -575,7 +574,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T set(@NonNull ArgType key, @NonNull ArgType value) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(Set, newArgsBuilder().add(key).add(value)));
+        addCommand(Set, newArgsBuilder().add(key).add(value));
         return getThis();
     }
 
@@ -597,8 +596,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T set(
             @NonNull ArgType key, @NonNull ArgType value, @NonNull SetOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(Set, newArgsBuilder().add(key).add(value).add(options.toArgsBinary())));
+        addCommand(Set, newArgsBuilder().add(key).add(value).add(options.toArgsBinary()));
         return getThis();
     }
 
@@ -616,7 +614,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T append(@NonNull ArgType key, @NonNull ArgType value) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(Append, newArgsBuilder().add(key).add(value)));
+        addCommand(Append, newArgsBuilder().add(key).add(value));
         return getThis();
     }
 
@@ -634,7 +632,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T mget(@NonNull ArgType[] keys) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(buildCommand(MGet, newArgsBuilder().add(keys)));
+        addCommand(MGet, newArgsBuilder().add(keys));
         return getThis();
     }
 
@@ -647,7 +645,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public T mset(@NonNull Map<?, ?> keyValueMap) {
         GlideString[] args = flattenMapToGlideStringArray(keyValueMap);
-        protobufBatch.addCommands(buildCommand(MSet, newArgsBuilder().add(args)));
+        addCommand(MSet, newArgsBuilder().add(args));
         return getThis();
     }
 
@@ -662,7 +660,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public T msetnx(@NonNull Map<?, ?> keyValueMap) {
         GlideString[] args = flattenMapToGlideStringArray(keyValueMap);
-        protobufBatch.addCommands(buildCommand(MSetNX, newArgsBuilder().add(args)));
+        addCommand(MSetNX, newArgsBuilder().add(args));
         return getThis();
     }
 
@@ -681,7 +679,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T move(ArgType key, long dbIndex) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(Move, newArgsBuilder().add(key).add(dbIndex)));
+        addCommand(Move, newArgsBuilder().add(key).add(dbIndex));
         return getThis();
     }
 
@@ -697,7 +695,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T incr(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(Incr, newArgsBuilder().add(key)));
+        addCommand(Incr, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -714,7 +712,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T incrBy(@NonNull ArgType key, long amount) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(IncrBy, newArgsBuilder().add(key).add(amount)));
+        addCommand(IncrBy, newArgsBuilder().add(key).add(amount));
         return getThis();
     }
 
@@ -733,7 +731,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T incrByFloat(@NonNull ArgType key, double amount) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(IncrByFloat, newArgsBuilder().add(key).add(amount)));
+        addCommand(IncrByFloat, newArgsBuilder().add(key).add(amount));
         return getThis();
     }
 
@@ -749,7 +747,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T decr(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(Decr, newArgsBuilder().add(key)));
+        addCommand(Decr, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -766,7 +764,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T decrBy(@NonNull ArgType key, long amount) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(DecrBy, newArgsBuilder().add(key).add(amount)));
+        addCommand(DecrBy, newArgsBuilder().add(key).add(amount));
         return getThis();
     }
 
@@ -783,7 +781,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T strlen(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(Strlen, newArgsBuilder().add(key)));
+        addCommand(Strlen, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -805,8 +803,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T setrange(@NonNull ArgType key, int offset, @NonNull ArgType value) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(SetRange, newArgsBuilder().add(key).add(offset).add(value)));
+        addCommand(SetRange, newArgsBuilder().add(key).add(offset).add(value));
         return getThis();
     }
 
@@ -828,8 +825,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T getrange(@NonNull ArgType key, int start, int end) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(GetRange, newArgsBuilder().add(key).add(start).add(end)));
+        addCommand(GetRange, newArgsBuilder().add(key).add(start).add(end));
         return getThis();
     }
 
@@ -846,7 +842,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hget(@NonNull ArgType key, @NonNull ArgType field) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(HGet, newArgsBuilder().add(key).add(field)));
+        addCommand(HGet, newArgsBuilder().add(key).add(field));
         return getThis();
     }
 
@@ -863,9 +859,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hset(@NonNull ArgType key, @NonNull Map<ArgType, ArgType> fieldValueMap) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        HSet, newArgsBuilder().add(key).add(flattenMapToGlideStringArray(fieldValueMap))));
+        addCommand(
+                        HSet, newArgsBuilder().add(key).add(flattenMapToGlideStringArray(fieldValueMap)));
         return getThis();
     }
 
@@ -901,15 +896,13 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull Map<ArgType, ArgType> fieldValueMap,
             @NonNull HSetExOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        HSetEx,
-                        newArgsBuilder()
+        addCommand(
+                        HSetEx, newArgsBuilder()
                                 .add(key)
                                 .add(options.toArgs())
                                 .add(FIELDS_VALKEY_API)
                                 .add(fieldValueMap.size())
-                                .add(flattenMapToGlideStringArray(fieldValueMap))));
+                                .add(flattenMapToGlideStringArray(fieldValueMap)));
         return getThis();
     }
 
@@ -943,15 +936,13 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T hgetex(
             @NonNull ArgType key, @NonNull ArgType[] fields, @NonNull HGetExOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        HGetEx,
-                        newArgsBuilder()
+        addCommand(
+                        HGetEx, newArgsBuilder()
                                 .add(key)
                                 .add(options.toArgs())
                                 .add(FIELDS_VALKEY_API)
                                 .add(fields.length)
-                                .add(fields)));
+                                .add(fields));
         return getThis();
     }
 
@@ -992,16 +983,14 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull ArgType[] fields,
             @NonNull HashFieldExpirationConditionOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        HExpire,
-                        newArgsBuilder()
+        addCommand(
+                        HExpire, newArgsBuilder()
                                 .add(key)
                                 .add(seconds)
                                 .add(options.toArgs())
                                 .add(FIELDS_VALKEY_API)
                                 .add(fields.length)
-                                .add(fields)));
+                                .add(fields));
         return getThis();
     }
 
@@ -1025,10 +1014,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hpersist(@NonNull ArgType key, @NonNull ArgType[] fields) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        HPersist,
-                        newArgsBuilder().add(key).add(FIELDS_VALKEY_API).add(fields.length).add(fields)));
+        addCommand(
+                        HPersist, newArgsBuilder().add(key).add(FIELDS_VALKEY_API).add(fields.length).add(fields));
         return getThis();
     }
 
@@ -1068,16 +1055,14 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull ArgType[] fields,
             @NonNull HashFieldExpirationConditionOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        HPExpire,
-                        newArgsBuilder()
+        addCommand(
+                        HPExpire, newArgsBuilder()
                                 .add(key)
                                 .add(milliseconds)
                                 .add(options.toArgs())
                                 .add(FIELDS_VALKEY_API)
                                 .add(fields.length)
-                                .add(fields)));
+                                .add(fields));
         return getThis();
     }
 
@@ -1119,16 +1104,14 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull ArgType[] fields,
             @NonNull HashFieldExpirationConditionOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        HExpireAt,
-                        newArgsBuilder()
+        addCommand(
+                        HExpireAt, newArgsBuilder()
                                 .add(key)
                                 .add(unixSeconds)
                                 .add(options.toArgs())
                                 .add(FIELDS_VALKEY_API)
                                 .add(fields.length)
-                                .add(fields)));
+                                .add(fields));
         return getThis();
     }
 
@@ -1172,16 +1155,14 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull ArgType[] fields,
             @NonNull HashFieldExpirationConditionOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        HPExpireAt,
-                        newArgsBuilder()
+        addCommand(
+                        HPExpireAt, newArgsBuilder()
                                 .add(key)
                                 .add(unixMilliseconds)
                                 .add(options.toArgs())
                                 .add(FIELDS_VALKEY_API)
                                 .add(fields.length)
-                                .add(fields)));
+                                .add(fields));
         return getThis();
     }
 
@@ -1203,9 +1184,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T httl(@NonNull ArgType key, @NonNull ArgType[] fields) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        HTtl, newArgsBuilder().add(key).add(FIELDS_VALKEY_API).add(fields.length).add(fields)));
+        addCommand(
+                        HTtl, newArgsBuilder().add(key).add(FIELDS_VALKEY_API).add(fields.length).add(fields));
         return getThis();
     }
 
@@ -1227,10 +1207,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hpttl(@NonNull ArgType key, @NonNull ArgType[] fields) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        HPTtl,
-                        newArgsBuilder().add(key).add(FIELDS_VALKEY_API).add(fields.length).add(fields)));
+        addCommand(
+                        HPTtl, newArgsBuilder().add(key).add(FIELDS_VALKEY_API).add(fields.length).add(fields));
         return getThis();
     }
 
@@ -1253,10 +1231,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hexpiretime(@NonNull ArgType key, @NonNull ArgType[] fields) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        HExpireTime,
-                        newArgsBuilder().add(key).add(FIELDS_VALKEY_API).add(fields.length).add(fields)));
+        addCommand(
+                        HExpireTime, newArgsBuilder().add(key).add(FIELDS_VALKEY_API).add(fields.length).add(fields));
         return getThis();
     }
 
@@ -1280,10 +1256,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hpexpiretime(@NonNull ArgType key, @NonNull ArgType[] fields) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        HPExpireTime,
-                        newArgsBuilder().add(key).add(FIELDS_VALKEY_API).add(fields.length).add(fields)));
+        addCommand(
+                        HPExpireTime, newArgsBuilder().add(key).add(FIELDS_VALKEY_API).add(fields.length).add(fields));
         return getThis();
     }
 
@@ -1304,8 +1278,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hsetnx(@NonNull ArgType key, @NonNull ArgType field, @NonNull ArgType value) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(HSetNX, newArgsBuilder().add(key).add(field).add(value)));
+        addCommand(HSetNX, newArgsBuilder().add(key).add(field).add(value));
         return getThis();
     }
 
@@ -1324,7 +1297,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hdel(@NonNull ArgType key, @NonNull ArgType[] fields) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(HDel, newArgsBuilder().add(key).add(fields)));
+        addCommand(HDel, newArgsBuilder().add(key).add(fields));
         return getThis();
     }
 
@@ -1341,7 +1314,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hlen(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(HLen, newArgsBuilder().add(key)));
+        addCommand(HLen, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -1357,7 +1330,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hvals(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(HVals, newArgsBuilder().add(key)));
+        addCommand(HVals, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -1377,7 +1350,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hmget(@NonNull ArgType key, @NonNull ArgType[] fields) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(HMGet, newArgsBuilder().add(key).add(fields)));
+        addCommand(HMGet, newArgsBuilder().add(key).add(fields));
         return getThis();
     }
 
@@ -1395,7 +1368,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hexists(@NonNull ArgType key, @NonNull ArgType field) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(HExists, newArgsBuilder().add(key).add(field)));
+        addCommand(HExists, newArgsBuilder().add(key).add(field));
         return getThis();
     }
 
@@ -1412,7 +1385,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hgetall(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(HGetAll, newArgsBuilder().add(key)));
+        addCommand(HGetAll, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -1435,8 +1408,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hincrBy(@NonNull ArgType key, @NonNull ArgType field, long amount) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(HIncrBy, newArgsBuilder().add(key).add(field).add(amount)));
+        addCommand(HIncrBy, newArgsBuilder().add(key).add(field).add(amount));
         return getThis();
     }
 
@@ -1460,8 +1432,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hincrByFloat(@NonNull ArgType key, @NonNull ArgType field, double amount) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(HIncrByFloat, newArgsBuilder().add(key).add(field).add(amount)));
+        addCommand(HIncrByFloat, newArgsBuilder().add(key).add(field).add(amount));
         return getThis();
     }
 
@@ -1477,7 +1448,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hkeys(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(HKeys, newArgsBuilder().add(key)));
+        addCommand(HKeys, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -1495,7 +1466,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hstrlen(@NonNull ArgType key, @NonNull ArgType field) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(HStrlen, newArgsBuilder().add(key).add(field)));
+        addCommand(HStrlen, newArgsBuilder().add(key).add(field));
         return getThis();
     }
 
@@ -1512,7 +1483,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hrandfield(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(HRandField, newArgsBuilder().add(key)));
+        addCommand(HRandField, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -1533,7 +1504,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hrandfieldWithCount(@NonNull ArgType key, long count) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(HRandField, newArgsBuilder().add(key).add(count)));
+        addCommand(HRandField, newArgsBuilder().add(key).add(count));
         return getThis();
     }
 
@@ -1556,8 +1527,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hrandfieldWithCountWithValues(@NonNull ArgType key, long count) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(HRandField, newArgsBuilder().add(key).add(count).add(WITH_VALUES_VALKEY_API)));
+        addCommand(HRandField, newArgsBuilder().add(key).add(count).add(WITH_VALUES_VALKEY_API));
         return getThis();
     }
 
@@ -1576,7 +1546,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T lpush(@NonNull ArgType key, @NonNull ArgType[] elements) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(LPush, newArgsBuilder().add(key).add(elements)));
+        addCommand(LPush, newArgsBuilder().add(key).add(elements));
         return getThis();
     }
 
@@ -1593,7 +1563,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T lpop(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(LPop, newArgsBuilder().add(key)));
+        addCommand(LPop, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -1612,7 +1582,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T lpos(@NonNull ArgType key, @NonNull ArgType element) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(LPos, newArgsBuilder().add(key).add(element)));
+        addCommand(LPos, newArgsBuilder().add(key).add(element));
         return getThis();
     }
 
@@ -1633,8 +1603,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T lpos(
             @NonNull ArgType key, @NonNull ArgType element, @NonNull LPosOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(LPos, newArgsBuilder().add(key).add(element).add(options.toArgs())));
+        addCommand(LPos, newArgsBuilder().add(key).add(element).add(options.toArgs()));
         return getThis();
     }
 
@@ -1653,9 +1622,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T lposCount(@NonNull ArgType key, @NonNull ArgType element, long count) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        LPos, newArgsBuilder().add(key).add(element).add(COUNT_VALKEY_API).add(count)));
+        addCommand(
+                        LPos, newArgsBuilder().add(key).add(element).add(COUNT_VALKEY_API).add(count));
         return getThis();
     }
 
@@ -1677,15 +1645,13 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T lposCount(
             @NonNull ArgType key, @NonNull ArgType element, long count, @NonNull LPosOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        LPos,
-                        newArgsBuilder()
+        addCommand(
+                        LPos, newArgsBuilder()
                                 .add(key)
                                 .add(element)
                                 .add(COUNT_VALKEY_API)
                                 .add(count)
-                                .add(options.toArgs())));
+                                .add(options.toArgs()));
         return getThis();
     }
 
@@ -1704,7 +1670,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T lpopCount(@NonNull ArgType key, long count) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(LPop, newArgsBuilder().add(key).add(count)));
+        addCommand(LPop, newArgsBuilder().add(key).add(count));
         return getThis();
     }
 
@@ -1731,7 +1697,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T lrange(@NonNull ArgType key, long start, long end) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(LRange, newArgsBuilder().add(key).add(start).add(end)));
+        addCommand(LRange, newArgsBuilder().add(key).add(start).add(end));
         return getThis();
     }
 
@@ -1754,7 +1720,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T lindex(@NonNull ArgType key, long index) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(LIndex, newArgsBuilder().add(key).add(index)));
+        addCommand(LIndex, newArgsBuilder().add(key).add(index));
         return getThis();
     }
 
@@ -1782,7 +1748,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T ltrim(@NonNull ArgType key, long start, long end) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(LTrim, newArgsBuilder().add(key).add(start).add(end)));
+        addCommand(LTrim, newArgsBuilder().add(key).add(start).add(end));
         return getThis();
     }
 
@@ -1799,7 +1765,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T llen(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(LLen, newArgsBuilder().add(key)));
+        addCommand(LLen, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -1825,8 +1791,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T lrem(@NonNull ArgType key, long count, @NonNull ArgType element) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(LRem, newArgsBuilder().add(key).add(count).add(element)));
+        addCommand(LRem, newArgsBuilder().add(key).add(count).add(element));
         return getThis();
     }
 
@@ -1845,7 +1810,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T rpush(@NonNull ArgType key, @NonNull ArgType[] elements) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(RPush, newArgsBuilder().add(key).add(elements)));
+        addCommand(RPush, newArgsBuilder().add(key).add(elements));
         return getThis();
     }
 
@@ -1862,7 +1827,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T rpop(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(RPop, newArgsBuilder().add(key)));
+        addCommand(RPop, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -1880,7 +1845,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T rpopCount(@NonNull ArgType key, long count) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(RPop, newArgsBuilder().add(key).add(count)));
+        addCommand(RPop, newArgsBuilder().add(key).add(count));
         return getThis();
     }
 
@@ -1900,7 +1865,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T sadd(@NonNull ArgType key, @NonNull ArgType[] members) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(SAdd, newArgsBuilder().add(key).add(members)));
+        addCommand(SAdd, newArgsBuilder().add(key).add(members));
         return getThis();
     }
 
@@ -1918,7 +1883,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T sismember(@NonNull ArgType key, @NonNull ArgType member) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(SIsMember, newArgsBuilder().add(key).add(member)));
+        addCommand(SIsMember, newArgsBuilder().add(key).add(member));
         return getThis();
     }
 
@@ -1938,7 +1903,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T srem(@NonNull ArgType key, @NonNull ArgType[] members) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(SRem, newArgsBuilder().add(key).add(members)));
+        addCommand(SRem, newArgsBuilder().add(key).add(members));
         return getThis();
     }
 
@@ -1954,7 +1919,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T smembers(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(SMembers, newArgsBuilder().add(key)));
+        addCommand(SMembers, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -1970,7 +1935,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T scard(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(SCard, newArgsBuilder().add(key)));
+        addCommand(SCard, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -1987,7 +1952,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T sdiff(@NonNull ArgType[] keys) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(buildCommand(SDiff, newArgsBuilder().add(keys)));
+        addCommand(SDiff, newArgsBuilder().add(keys));
         return getThis();
     }
 
@@ -2004,7 +1969,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T smismember(@NonNull ArgType key, @NonNull ArgType[] members) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(SMIsMember, newArgsBuilder().add(key).add(members)));
+        addCommand(SMIsMember, newArgsBuilder().add(key).add(members));
         return getThis();
     }
 
@@ -2021,8 +1986,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T sdiffstore(@NonNull ArgType destination, @NonNull ArgType[] keys) {
         checkTypeOrThrow(destination);
-        protobufBatch.addCommands(
-                buildCommand(SDiffStore, newArgsBuilder().add(destination).add(keys)));
+        addCommand(SDiffStore, newArgsBuilder().add(destination).add(keys));
         return getThis();
     }
 
@@ -2043,8 +2007,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T smove(
             @NonNull ArgType source, @NonNull ArgType destination, @NonNull ArgType member) {
         checkTypeOrThrow(source);
-        protobufBatch.addCommands(
-                buildCommand(SMove, newArgsBuilder().add(source).add(destination).add(member)));
+        addCommand(SMove, newArgsBuilder().add(source).add(destination).add(member));
         return getThis();
     }
 
@@ -2061,7 +2024,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T sinter(@NonNull ArgType[] keys) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(buildCommand(SInter, newArgsBuilder().add(keys)));
+        addCommand(SInter, newArgsBuilder().add(keys));
         return getThis();
     }
 
@@ -2078,8 +2041,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T sinterstore(@NonNull ArgType destination, @NonNull ArgType[] keys) {
         checkTypeOrThrow(destination);
-        protobufBatch.addCommands(
-                buildCommand(SInterStore, newArgsBuilder().add(destination).add(keys)));
+        addCommand(SInterStore, newArgsBuilder().add(destination).add(keys));
         return getThis();
     }
 
@@ -2096,8 +2058,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T sintercard(@NonNull ArgType[] keys) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(
-                buildCommand(SInterCard, newArgsBuilder().add(keys.length).add(keys)));
+        addCommand(SInterCard, newArgsBuilder().add(keys.length).add(keys));
         return getThis();
     }
 
@@ -2116,10 +2077,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T sintercard(@NonNull ArgType[] keys, long limit) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(
-                buildCommand(
-                        SInterCard,
-                        newArgsBuilder().add(keys.length).add(keys).add(SET_LIMIT_VALKEY_API).add(limit)));
+        addCommand(
+                        SInterCard, newArgsBuilder().add(keys.length).add(keys).add(SET_LIMIT_VALKEY_API).add(limit));
         return getThis();
     }
 
@@ -2136,8 +2095,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T sunionstore(@NonNull ArgType destination, @NonNull ArgType[] keys) {
         checkTypeOrThrow(destination);
-        protobufBatch.addCommands(
-                buildCommand(SUnionStore, newArgsBuilder().add(destination).add(keys)));
+        addCommand(SUnionStore, newArgsBuilder().add(destination).add(keys));
         return getThis();
     }
 
@@ -2155,7 +2113,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T configGet(@NonNull ArgType[] parameters) {
         checkTypeOrThrow(parameters);
-        protobufBatch.addCommands(buildCommand(ConfigGet, newArgsBuilder().add(parameters)));
+        addCommand(ConfigGet, newArgsBuilder().add(parameters));
         return getThis();
     }
 
@@ -2171,8 +2129,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - <code>"OK"</code> response on success.
      */
     public <ArgType> T configSet(@NonNull Map<ArgType, ArgType> parameters) {
-        protobufBatch.addCommands(
-                buildCommand(ConfigSet, newArgsBuilder().add(flattenMapToGlideStringArray(parameters))));
+        addCommand(ConfigSet, newArgsBuilder().add(flattenMapToGlideStringArray(parameters)));
         return getThis();
     }
 
@@ -2188,7 +2145,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T exists(@NonNull ArgType[] keys) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(buildCommand(Exists, newArgsBuilder().add(keys)));
+        addCommand(Exists, newArgsBuilder().add(keys));
         return getThis();
     }
 
@@ -2206,7 +2163,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T unlink(@NonNull ArgType[] keys) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(buildCommand(Unlink, newArgsBuilder().add(keys)));
+        addCommand(Unlink, newArgsBuilder().add(keys));
         return getThis();
     }
 
@@ -2230,7 +2187,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T expire(@NonNull ArgType key, long seconds) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(Expire, newArgsBuilder().add(key).add(seconds)));
+        addCommand(Expire, newArgsBuilder().add(key).add(seconds));
         return getThis();
     }
 
@@ -2257,8 +2214,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T expire(
             @NonNull ArgType key, long seconds, @NonNull ExpireOptions expireOptions) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(Expire, newArgsBuilder().add(key).add(seconds).add(expireOptions.toArgs())));
+        addCommand(Expire, newArgsBuilder().add(key).add(seconds).add(expireOptions.toArgs()));
         return getThis();
     }
 
@@ -2282,7 +2238,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T expireAt(@NonNull ArgType key, long unixSeconds) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ExpireAt, newArgsBuilder().add(key).add(unixSeconds)));
+        addCommand(ExpireAt, newArgsBuilder().add(key).add(unixSeconds));
         return getThis();
     }
 
@@ -2309,9 +2265,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T expireAt(
             @NonNull ArgType key, long unixSeconds, @NonNull ExpireOptions expireOptions) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        ExpireAt, newArgsBuilder().add(key).add(unixSeconds).add(expireOptions.toArgs())));
+        addCommand(
+                        ExpireAt, newArgsBuilder().add(key).add(unixSeconds).add(expireOptions.toArgs()));
         return getThis();
     }
 
@@ -2335,7 +2290,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T pexpire(@NonNull ArgType key, long milliseconds) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(PExpire, newArgsBuilder().add(key).add(milliseconds)));
+        addCommand(PExpire, newArgsBuilder().add(key).add(milliseconds));
         return getThis();
     }
 
@@ -2362,9 +2317,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T pexpire(
             @NonNull ArgType key, long milliseconds, @NonNull ExpireOptions expireOptions) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        PExpire, newArgsBuilder().add(key).add(milliseconds).add(expireOptions.toArgs())));
+        addCommand(
+                        PExpire, newArgsBuilder().add(key).add(milliseconds).add(expireOptions.toArgs()));
         return getThis();
     }
 
@@ -2388,8 +2342,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T pexpireAt(@NonNull ArgType key, long unixMilliseconds) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(PExpireAt, newArgsBuilder().add(key).add(unixMilliseconds)));
+        addCommand(PExpireAt, newArgsBuilder().add(key).add(unixMilliseconds));
         return getThis();
     }
 
@@ -2416,10 +2369,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T pexpireAt(
             @NonNull ArgType key, long unixMilliseconds, @NonNull ExpireOptions expireOptions) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        PExpireAt,
-                        newArgsBuilder().add(key).add(unixMilliseconds).add(expireOptions.toArgs())));
+        addCommand(
+                        PExpireAt, newArgsBuilder().add(key).add(unixMilliseconds).add(expireOptions.toArgs()));
         return getThis();
     }
 
@@ -2435,7 +2386,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T ttl(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(TTL, newArgsBuilder().add(key)));
+        addCommand(TTL, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -2455,7 +2406,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T expiretime(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ExpireTime, newArgsBuilder().add(key)));
+        addCommand(ExpireTime, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -2475,7 +2426,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T pexpiretime(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(PExpireTime, newArgsBuilder().add(key)));
+        addCommand(PExpireTime, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -2486,7 +2437,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command response - The id of the client.
      */
     public T clientId() {
-        protobufBatch.addCommands(buildCommand(ClientId));
+        addCommand(ClientId);
         return getThis();
     }
 
@@ -2498,7 +2449,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      *     <code>null</code> if no name is assigned.
      */
     public T clientGetName() {
-        protobufBatch.addCommands(buildCommand(ClientGetName));
+        addCommand(ClientGetName);
         return getThis();
     }
 
@@ -2510,8 +2461,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - <code>"OK"</code> on success.
      */
     public T clientPause(long timeout) {
-        protobufBatch.addCommands(
-                buildCommand(ClientPause, newArgsBuilder().add(Long.toString(timeout))));
+        addCommand(ClientPause, newArgsBuilder().add(Long.toString(timeout)));
         return getThis();
     }
 
@@ -2524,9 +2474,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - <code>"OK"</code> on success.
      */
     public T clientPause(long timeout, @NonNull ClientPauseMode mode) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        ClientPause, newArgsBuilder().add(Long.toString(timeout)).add(mode.getValkeyApi())));
+        addCommand(
+                        ClientPause, newArgsBuilder().add(Long.toString(timeout)).add(mode.getValkeyApi()));
         return getThis();
     }
 
@@ -2537,7 +2486,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - <code>"OK"</code> on success.
      */
     public T clientUnpause() {
-        protobufBatch.addCommands(buildCommand(ClientUnpause));
+        addCommand(ClientUnpause);
         return getThis();
     }
 
@@ -2550,7 +2499,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      *     {@code prefixes} ({@code Object[]} of monitored key prefixes).
      */
     public T clientTrackingInfo() {
-        protobufBatch.addCommands(buildCommand(ClientTrackingInfo));
+        addCommand(ClientTrackingInfo);
         return getThis();
     }
 
@@ -2561,7 +2510,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - <code>"OK"</code> response on success.
      */
     public T configRewrite() {
-        protobufBatch.addCommands(buildCommand(ConfigRewrite));
+        addCommand(ConfigRewrite);
         return getThis();
     }
 
@@ -2574,7 +2523,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - <code>"OK"</code> response on success.
      */
     public T configResetStat() {
-        protobufBatch.addCommands(buildCommand(ConfigResetStat));
+        addCommand(ConfigResetStat);
         return getThis();
     }
 
@@ -2605,7 +2554,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             args.add("CH");
         }
         args.add(flattenMapToGlideStringArrayValueFirst(membersScoresMap));
-        protobufBatch.addCommands(buildCommand(ZAdd, args));
+        addCommand(ZAdd, args);
         return getThis();
     }
 
@@ -2688,15 +2637,13 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             double increment,
             @NonNull ZAddOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZAdd,
-                        newArgsBuilder()
+        addCommand(
+                        ZAdd, newArgsBuilder()
                                 .add(key)
                                 .add(options.toArgs())
                                 .add("INCR")
                                 .add(increment)
-                                .add(member)));
+                                .add(member));
         return getThis();
     }
 
@@ -2736,7 +2683,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zrem(@NonNull ArgType key, @NonNull ArgType[] members) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ZRem, newArgsBuilder().add(key).add(members)));
+        addCommand(ZRem, newArgsBuilder().add(key).add(members));
         return getThis();
     }
 
@@ -2753,7 +2700,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zcard(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ZCard, newArgsBuilder().add(key)));
+        addCommand(ZCard, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -2775,7 +2722,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zpopmin(@NonNull ArgType key, long count) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ZPopMin, newArgsBuilder().add(key).add(count)));
+        addCommand(ZPopMin, newArgsBuilder().add(key).add(count));
         return getThis();
     }
 
@@ -2793,7 +2740,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zpopmin(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ZPopMin, newArgsBuilder().add(key)));
+        addCommand(ZPopMin, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -2810,7 +2757,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zrandmember(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ZRandMember, newArgsBuilder().add(key)));
+        addCommand(ZRandMember, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -2830,7 +2777,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zrandmemberWithCount(@NonNull ArgType key, long count) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ZRandMember, newArgsBuilder().add(key).add(count)));
+        addCommand(ZRandMember, newArgsBuilder().add(key).add(count));
         return getThis();
     }
 
@@ -2853,9 +2800,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zrandmemberWithCountWithScores(ArgType key, long count) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZRandMember, newArgsBuilder().add(key).add(count).add(WITH_SCORES_VALKEY_API)));
+        addCommand(
+                        ZRandMember, newArgsBuilder().add(key).add(count).add(WITH_SCORES_VALKEY_API));
         return getThis();
     }
 
@@ -2876,8 +2822,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zincrby(@NonNull ArgType key, double increment, @NonNull ArgType member) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(ZIncrBy, newArgsBuilder().add(key).add(increment).add(member)));
+        addCommand(ZIncrBy, newArgsBuilder().add(key).add(increment).add(member));
         return getThis();
     }
 
@@ -2903,7 +2848,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T bzpopmin(@NonNull ArgType[] keys, double timeout) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(buildCommand(BZPopMin, newArgsBuilder().add(keys).add(timeout)));
+        addCommand(BZPopMin, newArgsBuilder().add(keys).add(timeout));
         return getThis();
     }
 
@@ -2925,7 +2870,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zpopmax(@NonNull ArgType key, long count) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ZPopMax, newArgsBuilder().add(key).add(count)));
+        addCommand(ZPopMax, newArgsBuilder().add(key).add(count));
         return getThis();
     }
 
@@ -2943,7 +2888,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zpopmax(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ZPopMax, newArgsBuilder().add(key)));
+        addCommand(ZPopMax, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -2969,7 +2914,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T bzpopmax(@NonNull ArgType[] keys, double timeout) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(buildCommand(BZPopMax, newArgsBuilder().add(keys).add(timeout)));
+        addCommand(BZPopMax, newArgsBuilder().add(keys).add(timeout));
         return getThis();
     }
 
@@ -2987,7 +2932,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zscore(@NonNull ArgType key, @NonNull ArgType member) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ZScore, newArgsBuilder().add(key).add(member)));
+        addCommand(ZScore, newArgsBuilder().add(key).add(member));
         return getThis();
     }
 
@@ -3007,7 +2952,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zrank(@NonNull ArgType key, @NonNull ArgType member) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ZRank, newArgsBuilder().add(key).add(member)));
+        addCommand(ZRank, newArgsBuilder().add(key).add(member));
         return getThis();
     }
 
@@ -3028,8 +2973,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zrankWithScore(@NonNull ArgType key, @NonNull ArgType member) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(ZRank, newArgsBuilder().add(key).add(member).add(WITH_SCORE_VALKEY_API)));
+        addCommand(ZRank, newArgsBuilder().add(key).add(member).add(WITH_SCORE_VALKEY_API));
         return getThis();
     }
 
@@ -3050,7 +2994,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zrevrank(@NonNull ArgType key, @NonNull ArgType member) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ZRevRank, newArgsBuilder().add(key).add(member)));
+        addCommand(ZRevRank, newArgsBuilder().add(key).add(member));
         return getThis();
     }
 
@@ -3072,8 +3016,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zrevrankWithScore(@NonNull ArgType key, @NonNull ArgType member) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(ZRevRank, newArgsBuilder().add(key).add(member).add(WITH_SCORE_VALKEY_API)));
+        addCommand(ZRevRank, newArgsBuilder().add(key).add(member).add(WITH_SCORE_VALKEY_API));
         return getThis();
     }
 
@@ -3092,7 +3035,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zmscore(@NonNull ArgType key, @NonNull ArgType[] members) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ZMScore, newArgsBuilder().add(key).add(members)));
+        addCommand(ZMScore, newArgsBuilder().add(key).add(members));
         return getThis();
     }
 
@@ -3112,7 +3055,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zdiff(@NonNull ArgType[] keys) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(buildCommand(ZDiff, newArgsBuilder().add(keys.length).add(keys)));
+        addCommand(ZDiff, newArgsBuilder().add(keys.length).add(keys));
         return getThis();
     }
 
@@ -3131,9 +3074,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zdiffWithScores(@NonNull ArgType[] keys) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZDiff, newArgsBuilder().add(keys.length).add(keys).add(WITH_SCORES_VALKEY_API)));
+        addCommand(
+                        ZDiff, newArgsBuilder().add(keys.length).add(keys).add(WITH_SCORES_VALKEY_API));
         return getThis();
     }
 
@@ -3153,8 +3095,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zdiffstore(@NonNull ArgType destination, @NonNull ArgType[] keys) {
         checkTypeOrThrow(destination);
-        protobufBatch.addCommands(
-                buildCommand(ZDiffStore, newArgsBuilder().add(destination).add(keys.length).add(keys)));
+        addCommand(ZDiffStore, newArgsBuilder().add(destination).add(keys.length).add(keys));
         return getThis();
     }
 
@@ -3180,9 +3121,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T zcount(
             @NonNull ArgType key, @NonNull ScoreRange minScore, @NonNull ScoreRange maxScore) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZCount, newArgsBuilder().add(key).add(minScore.toArgs()).add(maxScore.toArgs())));
+        addCommand(
+                        ZCount, newArgsBuilder().add(key).add(minScore.toArgs()).add(maxScore.toArgs()));
         return getThis();
     }
 
@@ -3207,8 +3147,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zremrangebyrank(@NonNull ArgType key, long start, long end) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(ZRemRangeByRank, newArgsBuilder().add(key).add(start).add(end)));
+        addCommand(ZRemRangeByRank, newArgsBuilder().add(key).add(start).add(end));
         return getThis();
     }
 
@@ -3239,13 +3178,11 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull RangeQuery rangeQuery,
             boolean reverse) {
         checkTypeOrThrow(destination);
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZRangeStore,
-                        newArgsBuilder()
+        addCommand(
+                        ZRangeStore, newArgsBuilder()
                                 .add(destination)
                                 .add(source)
-                                .add(RangeOptions.createZRangeBaseArgs(rangeQuery, reverse, false))));
+                                .add(RangeOptions.createZRangeBaseArgs(rangeQuery, reverse, false)));
         return getThis();
     }
 
@@ -3296,9 +3233,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T zremrangebylex(
             @NonNull ArgType key, @NonNull LexRange minLex, @NonNull LexRange maxLex) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZRemRangeByLex, newArgsBuilder().add(key).add(minLex.toArgs()).add(maxLex.toArgs())));
+        addCommand(
+                        ZRemRangeByLex, newArgsBuilder().add(key).add(minLex.toArgs()).add(maxLex.toArgs()));
         return getThis();
     }
 
@@ -3324,10 +3260,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T zremrangebyscore(
             @NonNull ArgType key, @NonNull ScoreRange minScore, @NonNull ScoreRange maxScore) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZRemRangeByScore,
-                        newArgsBuilder().add(key).add(minScore.toArgs()).add(maxScore.toArgs())));
+        addCommand(
+                        ZRemRangeByScore, newArgsBuilder().add(key).add(minScore.toArgs()).add(maxScore.toArgs()));
         return getThis();
     }
 
@@ -3353,9 +3287,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T zlexcount(
             @NonNull ArgType key, @NonNull LexRange minLex, @NonNull LexRange maxLex) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZLexCount, newArgsBuilder().add(key).add(minLex.toArgs()).add(maxLex.toArgs())));
+        addCommand(
+                        ZLexCount, newArgsBuilder().add(key).add(minLex.toArgs()).add(maxLex.toArgs()));
         return getThis();
     }
 
@@ -3382,13 +3315,11 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull String destination,
             @NonNull KeysOrWeightedKeys keysOrWeightedKeys,
             @NonNull Aggregate aggregate) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZUnionStore,
-                        newArgsBuilder()
+        addCommand(
+                        ZUnionStore, newArgsBuilder()
                                 .add(destination)
                                 .add(keysOrWeightedKeys.toArgs())
-                                .add(aggregate.toArgs())));
+                                .add(aggregate.toArgs()));
         return getThis();
     }
 
@@ -3415,13 +3346,11 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull GlideString destination,
             @NonNull KeysOrWeightedKeysBinary keysOrWeightedKeys,
             @NonNull Aggregate aggregate) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZUnionStore,
-                        newArgsBuilder()
+        addCommand(
+                        ZUnionStore, newArgsBuilder()
                                 .add(destination)
                                 .add(keysOrWeightedKeys.toArgs())
-                                .add(aggregate.toArgs())));
+                                .add(aggregate.toArgs()));
         return getThis();
     }
 
@@ -3443,9 +3372,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public T zunionstore(
             @NonNull String destination, @NonNull KeysOrWeightedKeys keysOrWeightedKeys) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZUnionStore, newArgsBuilder().add(destination).add(keysOrWeightedKeys.toArgs())));
+        addCommand(
+                        ZUnionStore, newArgsBuilder().add(destination).add(keysOrWeightedKeys.toArgs()));
         return getThis();
     }
 
@@ -3467,9 +3395,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public T zunionstore(
             @NonNull GlideString destination, @NonNull KeysOrWeightedKeysBinary keysOrWeightedKeys) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZUnionStore, newArgsBuilder().add(destination).add(keysOrWeightedKeys.toArgs())));
+        addCommand(
+                        ZUnionStore, newArgsBuilder().add(destination).add(keysOrWeightedKeys.toArgs()));
         return getThis();
     }
 
@@ -3496,13 +3423,11 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull String destination,
             @NonNull KeysOrWeightedKeys keysOrWeightedKeys,
             @NonNull Aggregate aggregate) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZInterStore,
-                        newArgsBuilder()
+        addCommand(
+                        ZInterStore, newArgsBuilder()
                                 .add(destination)
                                 .add(keysOrWeightedKeys.toArgs())
-                                .add(aggregate.toArgs())));
+                                .add(aggregate.toArgs()));
         return getThis();
     }
 
@@ -3529,13 +3454,11 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull GlideString destination,
             @NonNull KeysOrWeightedKeysBinary keysOrWeightedKeys,
             @NonNull Aggregate aggregate) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZInterStore,
-                        newArgsBuilder()
+        addCommand(
+                        ZInterStore, newArgsBuilder()
                                 .add(destination)
                                 .add(keysOrWeightedKeys.toArgs())
-                                .add(aggregate.toArgs())));
+                                .add(aggregate.toArgs()));
         return getThis();
     }
 
@@ -3551,8 +3474,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zintercard(@NonNull ArgType[] keys) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(
-                buildCommand(ZInterCard, newArgsBuilder().add(keys.length).add(keys)));
+        addCommand(ZInterCard, newArgsBuilder().add(keys.length).add(keys));
         return getThis();
     }
 
@@ -3573,10 +3495,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zintercard(@NonNull ArgType[] keys, long limit) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZInterCard,
-                        newArgsBuilder().add(keys.length).add(keys).add(LIMIT_VALKEY_API).add(limit)));
+        addCommand(
+                        ZInterCard, newArgsBuilder().add(keys.length).add(keys).add(LIMIT_VALKEY_API).add(limit));
         return getThis();
     }
 
@@ -3600,9 +3520,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public T zinterstore(
             @NonNull String destination, @NonNull KeysOrWeightedKeys keysOrWeightedKeys) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZInterStore, newArgsBuilder().add(destination).add(keysOrWeightedKeys.toArgs())));
+        addCommand(
+                        ZInterStore, newArgsBuilder().add(destination).add(keysOrWeightedKeys.toArgs()));
         return getThis();
     }
 
@@ -3626,9 +3545,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public T zinterstore(
             @NonNull GlideString destination, @NonNull KeysOrWeightedKeysBinary keysOrWeightedKeys) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZInterStore, newArgsBuilder().add(destination).add(keysOrWeightedKeys.toArgs())));
+        addCommand(
+                        ZInterStore, newArgsBuilder().add(destination).add(keysOrWeightedKeys.toArgs()));
         return getThis();
     }
 
@@ -3642,7 +3560,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - The resulting sorted set from the union.
      */
     public T zunion(@NonNull KeyArray keys) {
-        protobufBatch.addCommands(buildCommand(ZUnion, newArgsBuilder().add(keys.toArgs())));
+        addCommand(ZUnion, newArgsBuilder().add(keys.toArgs()));
         return getThis();
     }
 
@@ -3656,7 +3574,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - The resulting sorted set from the union.
      */
     public T zunion(@NonNull KeyArrayBinary keys) {
-        protobufBatch.addCommands(buildCommand(ZUnion, newArgsBuilder().add(keys.toArgs())));
+        addCommand(ZUnion, newArgsBuilder().add(keys.toArgs()));
         return getThis();
     }
 
@@ -3678,13 +3596,11 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public T zunionWithScores(
             @NonNull KeysOrWeightedKeys keysOrWeightedKeys, @NonNull Aggregate aggregate) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZUnion,
-                        newArgsBuilder()
+        addCommand(
+                        ZUnion, newArgsBuilder()
                                 .add(keysOrWeightedKeys.toArgs())
                                 .add(aggregate.toArgs())
-                                .add(WITH_SCORES_VALKEY_API)));
+                                .add(WITH_SCORES_VALKEY_API));
         return getThis();
     }
 
@@ -3706,13 +3622,11 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public T zunionWithScores(
             @NonNull KeysOrWeightedKeysBinary keysOrWeightedKeys, @NonNull Aggregate aggregate) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZUnion,
-                        newArgsBuilder()
+        addCommand(
+                        ZUnion, newArgsBuilder()
                                 .add(keysOrWeightedKeys.toArgs())
                                 .add(aggregate.toArgs())
-                                .add(WITH_SCORES_VALKEY_API)));
+                                .add(WITH_SCORES_VALKEY_API));
         return getThis();
     }
 
@@ -3733,9 +3647,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - The resulting sorted set from the union.
      */
     public T zunionWithScores(@NonNull KeysOrWeightedKeys keysOrWeightedKeys) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZUnion, newArgsBuilder().add(keysOrWeightedKeys.toArgs()).add(WITH_SCORES_VALKEY_API)));
+        addCommand(
+                        ZUnion, newArgsBuilder().add(keysOrWeightedKeys.toArgs()).add(WITH_SCORES_VALKEY_API));
         return getThis();
     }
 
@@ -3756,9 +3669,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - The resulting sorted set from the union.
      */
     public T zunionWithScores(@NonNull KeysOrWeightedKeysBinary keysOrWeightedKeys) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZUnion, newArgsBuilder().add(keysOrWeightedKeys.toArgs()).add(WITH_SCORES_VALKEY_API)));
+        addCommand(
+                        ZUnion, newArgsBuilder().add(keysOrWeightedKeys.toArgs()).add(WITH_SCORES_VALKEY_API));
         return getThis();
     }
 
@@ -3773,7 +3685,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - The resulting sorted set from the intersection.
      */
     public T zinter(@NonNull KeyArray keys) {
-        protobufBatch.addCommands(buildCommand(ZInter, newArgsBuilder().add(keys.toArgs())));
+        addCommand(ZInter, newArgsBuilder().add(keys.toArgs()));
         return getThis();
     }
 
@@ -3788,7 +3700,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - The resulting sorted set from the intersection.
      */
     public T zinter(@NonNull KeyArrayBinary keys) {
-        protobufBatch.addCommands(buildCommand(ZInter, newArgsBuilder().add(keys.toArgs())));
+        addCommand(ZInter, newArgsBuilder().add(keys.toArgs()));
         return getThis();
     }
 
@@ -3808,9 +3720,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - The resulting sorted set from the intersection.
      */
     public T zinterWithScores(@NonNull KeysOrWeightedKeys keysOrWeightedKeys) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZInter, newArgsBuilder().add(keysOrWeightedKeys.toArgs()).add(WITH_SCORES_VALKEY_API)));
+        addCommand(
+                        ZInter, newArgsBuilder().add(keysOrWeightedKeys.toArgs()).add(WITH_SCORES_VALKEY_API));
         return getThis();
     }
 
@@ -3830,9 +3741,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - The resulting sorted set from the intersection.
      */
     public T zinterWithScores(@NonNull KeysOrWeightedKeysBinary keysOrWeightedKeys) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZInter, newArgsBuilder().add(keysOrWeightedKeys.toArgs()).add(WITH_SCORES_VALKEY_API)));
+        addCommand(
+                        ZInter, newArgsBuilder().add(keysOrWeightedKeys.toArgs()).add(WITH_SCORES_VALKEY_API));
         return getThis();
     }
 
@@ -3854,13 +3764,11 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public T zinterWithScores(
             @NonNull KeysOrWeightedKeys keysOrWeightedKeys, @NonNull Aggregate aggregate) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZInter,
-                        newArgsBuilder()
+        addCommand(
+                        ZInter, newArgsBuilder()
                                 .add(keysOrWeightedKeys.toArgs())
                                 .add(aggregate.toArgs())
-                                .add(WITH_SCORES_VALKEY_API)));
+                                .add(WITH_SCORES_VALKEY_API));
         return getThis();
     }
 
@@ -3882,13 +3790,11 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public T zinterWithScores(
             @NonNull KeysOrWeightedKeysBinary keysOrWeightedKeys, @NonNull Aggregate aggregate) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZInter,
-                        newArgsBuilder()
+        addCommand(
+                        ZInter, newArgsBuilder()
                                 .add(keysOrWeightedKeys.toArgs())
                                 .add(aggregate.toArgs())
-                                .add(WITH_SCORES_VALKEY_API)));
+                                .add(WITH_SCORES_VALKEY_API));
         return getThis();
     }
 
@@ -3944,13 +3850,11 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull Map<ArgType, ArgType> values,
             @NonNull StreamAddOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        XAdd,
-                        newArgsBuilder()
+        addCommand(
+                        XAdd, newArgsBuilder()
                                 .add(key)
                                 .add(options.toArgs())
-                                .add(flattenMapToGlideStringArray(values))));
+                                .add(flattenMapToGlideStringArray(values)));
         return getThis();
     }
 
@@ -3972,13 +3876,11 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T xadd(
             @NonNull ArgType key, @NonNull ArgType[][] values, @NonNull StreamAddOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        XAdd,
-                        newArgsBuilder()
+        addCommand(
+                        XAdd, newArgsBuilder()
                                 .add(key)
                                 .add(options.toArgs())
-                                .add(flattenNestedArrayToGlideStringArray(values))));
+                                .add(flattenNestedArrayToGlideStringArray(values)));
         return getThis();
     }
 
@@ -4015,12 +3917,10 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T xread(
             @NonNull Map<ArgType, ArgType> keysAndIds, @NonNull StreamReadOptions options) {
         checkTypeOrThrow(keysAndIds);
-        protobufBatch.addCommands(
-                buildCommand(
-                        XRead,
-                        newArgsBuilder()
+        addCommand(
+                        XRead, newArgsBuilder()
                                 .add(options.toArgs())
-                                .add(flattenAllKeysFollowedByAllValues(keysAndIds))));
+                                .add(flattenAllKeysFollowedByAllValues(keysAndIds)));
         return getThis();
     }
 
@@ -4036,7 +3936,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T xtrim(@NonNull ArgType key, @NonNull StreamTrimOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(XTrim, newArgsBuilder().add(key).add(options.toArgs())));
+        addCommand(XTrim, newArgsBuilder().add(key).add(options.toArgs()));
         return getThis();
     }
 
@@ -4052,7 +3952,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T xlen(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(XLen, newArgsBuilder().add(key)));
+        addCommand(XLen, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -4070,7 +3970,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T xdel(@NonNull ArgType key, @NonNull ArgType[] ids) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(XDel, newArgsBuilder().add(key).add(ids)));
+        addCommand(XDel, newArgsBuilder().add(key).add(ids));
         return getThis();
     }
 
@@ -4103,8 +4003,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T xrange(
             @NonNull ArgType key, @NonNull StreamRange start, @NonNull StreamRange end) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(XRange, newArgsBuilder().add(key).add(StreamRange.toArgs(start, end))));
+        addCommand(XRange, newArgsBuilder().add(key).add(StreamRange.toArgs(start, end)));
         return getThis();
     }
 
@@ -4139,8 +4038,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T xrange(
             @NonNull ArgType key, @NonNull StreamRange start, @NonNull StreamRange end, long count) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(XRange, newArgsBuilder().add(key).add(StreamRange.toArgs(start, end, count))));
+        addCommand(XRange, newArgsBuilder().add(key).add(StreamRange.toArgs(start, end, count)));
         return getThis();
     }
 
@@ -4175,8 +4073,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T xrevrange(
             @NonNull ArgType key, @NonNull StreamRange end, @NonNull StreamRange start) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(XRevRange, newArgsBuilder().add(key).add(StreamRange.toArgs(end, start))));
+        addCommand(XRevRange, newArgsBuilder().add(key).add(StreamRange.toArgs(end, start)));
         return getThis();
     }
 
@@ -4213,9 +4110,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T xrevrange(
             @NonNull ArgType key, @NonNull StreamRange end, @NonNull StreamRange start, long count) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        XRevRange, newArgsBuilder().add(key).add(StreamRange.toArgs(end, start, count))));
+        addCommand(
+                        XRevRange, newArgsBuilder().add(key).add(StreamRange.toArgs(end, start, count)));
         return getThis();
     }
 
@@ -4236,8 +4132,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T xgroupCreate(
             @NonNull ArgType key, @NonNull ArgType groupName, @NonNull ArgType id) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(XGroupCreate, newArgsBuilder().add(key).add(groupName).add(id)));
+        addCommand(XGroupCreate, newArgsBuilder().add(key).add(groupName).add(id));
         return getThis();
     }
 
@@ -4262,9 +4157,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull ArgType id,
             @NonNull StreamGroupOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        XGroupCreate, newArgsBuilder().add(key).add(groupName).add(id).add(options.toArgs())));
+        addCommand(
+                        XGroupCreate, newArgsBuilder().add(key).add(groupName).add(id).add(options.toArgs()));
         return getThis();
     }
 
@@ -4281,8 +4175,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T xgroupDestroy(@NonNull ArgType key, @NonNull ArgType groupName) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(XGroupDestroy, newArgsBuilder().add(key).add(groupName)));
+        addCommand(XGroupDestroy, newArgsBuilder().add(key).add(groupName));
         return getThis();
     }
 
@@ -4302,8 +4195,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T xgroupCreateConsumer(
             @NonNull ArgType key, @NonNull ArgType group, @NonNull ArgType consumer) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(XGroupCreateConsumer, newArgsBuilder().add(key).add(group).add(consumer)));
+        addCommand(XGroupCreateConsumer, newArgsBuilder().add(key).add(group).add(consumer));
         return getThis();
     }
 
@@ -4322,8 +4214,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T xgroupDelConsumer(
             @NonNull ArgType key, @NonNull ArgType group, @NonNull ArgType consumer) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(XGroupDelConsumer, newArgsBuilder().add(key).add(group).add(consumer)));
+        addCommand(XGroupDelConsumer, newArgsBuilder().add(key).add(group).add(consumer));
         return getThis();
     }
 
@@ -4342,8 +4233,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T xgroupSetId(
             @NonNull ArgType key, @NonNull ArgType groupName, @NonNull ArgType id) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(XGroupSetId, newArgsBuilder().add(key).add(groupName).add(id)));
+        addCommand(XGroupSetId, newArgsBuilder().add(key).add(groupName).add(id));
         return getThis();
     }
 
@@ -4364,15 +4254,13 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T xgroupSetId(
             @NonNull ArgType key, @NonNull ArgType groupName, @NonNull ArgType id, long entriesRead) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        XGroupSetId,
-                        newArgsBuilder()
+        addCommand(
+                        XGroupSetId, newArgsBuilder()
                                 .add(key)
                                 .add(groupName)
                                 .add(id)
                                 .add(ENTRIES_READ_VALKEY_API)
-                                .add(entriesRead)));
+                                .add(entriesRead));
         return getThis();
     }
 
@@ -4423,12 +4311,10 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull ArgType consumer,
             @NonNull StreamReadGroupOptions options) {
         checkTypeOrThrow(group);
-        protobufBatch.addCommands(
-                buildCommand(
-                        XReadGroup,
-                        newArgsBuilder()
+        addCommand(
+                        XReadGroup, newArgsBuilder()
                                 .add(options.toArgs(group, consumer))
-                                .add(flattenAllKeysFollowedByAllValues(keysAndIds))));
+                                .add(flattenAllKeysFollowedByAllValues(keysAndIds)));
         return getThis();
     }
 
@@ -4446,7 +4332,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T xack(@NonNull ArgType key, @NonNull ArgType group, @NonNull ArgType[] ids) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(XAck, newArgsBuilder().add(key).add(group).add(ids)));
+        addCommand(XAck, newArgsBuilder().add(key).add(group).add(ids));
         return getThis();
     }
 
@@ -4473,7 +4359,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T xpending(@NonNull ArgType key, @NonNull ArgType group) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(XPending, newArgsBuilder().add(key).add(group)));
+        addCommand(XPending, newArgsBuilder().add(key).add(group));
         return getThis();
     }
 
@@ -4568,9 +4454,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             long count,
             @NonNull StreamPendingOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        XPending, newArgsBuilder().add(key).add(group).add(options.toArgs(start, end, count))));
+        addCommand(
+                        XPending, newArgsBuilder().add(key).add(group).add(options.toArgs(start, end, count)));
         return getThis();
     }
 
@@ -4586,7 +4471,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      *     </code>.
      */
     public <ArgType> T xinfoStream(@NonNull ArgType key) {
-        protobufBatch.addCommands(buildCommand(XInfoStream, newArgsBuilder().add(key)));
+        addCommand(XInfoStream, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -4602,7 +4487,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      *     <code>key</code>.
      */
     public <ArgType> T xinfoStreamFull(@NonNull ArgType key) {
-        protobufBatch.addCommands(buildCommand(XInfoStream, newArgsBuilder().add(key).add(FULL)));
+        addCommand(XInfoStream, newArgsBuilder().add(key).add(FULL));
         return getThis();
     }
 
@@ -4620,10 +4505,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      *     <code>key</code>.
      */
     public <ArgType> T xinfoStreamFull(@NonNull ArgType key, int count) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        XInfoStream,
-                        newArgsBuilder().add(key).add(FULL).add(COUNT).add(Integer.toString(count))));
+        addCommand(
+                        XInfoStream, newArgsBuilder().add(key).add(FULL).add(COUNT).add(Integer.toString(count)));
         return getThis();
     }
 
@@ -4648,9 +4531,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             long minIdleTime,
             @NonNull ArgType[] ids) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        XClaim, newArgsBuilder().add(key).add(group).add(consumer).add(minIdleTime).add(ids)));
+        addCommand(
+                        XClaim, newArgsBuilder().add(key).add(group).add(consumer).add(minIdleTime).add(ids));
         return getThis();
     }
 
@@ -4677,16 +4559,14 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull ArgType[] ids,
             @NonNull StreamClaimOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        XClaim,
-                        newArgsBuilder()
+        addCommand(
+                        XClaim, newArgsBuilder()
                                 .add(key)
                                 .add(group)
                                 .add(consumer)
                                 .add(minIdleTime)
                                 .add(ids)
-                                .add(options.toArgs())));
+                                .add(options.toArgs()));
         return getThis();
     }
 
@@ -4711,16 +4591,14 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             long minIdleTime,
             @NonNull ArgType[] ids) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        XClaim,
-                        newArgsBuilder()
+        addCommand(
+                        XClaim, newArgsBuilder()
                                 .add(key)
                                 .add(group)
                                 .add(consumer)
                                 .add(minIdleTime)
                                 .add(ids)
-                                .add(JUST_ID_VALKEY_API)));
+                                .add(JUST_ID_VALKEY_API));
         return getThis();
     }
 
@@ -4747,17 +4625,15 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull ArgType[] ids,
             @NonNull StreamClaimOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        XClaim,
-                        newArgsBuilder()
+        addCommand(
+                        XClaim, newArgsBuilder()
                                 .add(key)
                                 .add(group)
                                 .add(consumer)
                                 .add(minIdleTime)
                                 .add(ids)
                                 .add(options.toArgs())
-                                .add(JUST_ID_VALKEY_API)));
+                                .add(JUST_ID_VALKEY_API));
         return getThis();
     }
 
@@ -4771,7 +4647,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      *     represents the attributes of a consumer group for the stream at <code>key</code>.
      */
     public <ArgType> T xinfoGroups(@NonNull ArgType key) {
-        protobufBatch.addCommands(buildCommand(XInfoGroups, newArgsBuilder().add(key)));
+        addCommand(XInfoGroups, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -4787,8 +4663,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      *     key</code>.
      */
     public <ArgType> T xinfoConsumers(@NonNull ArgType key, @NonNull ArgType groupName) {
-        protobufBatch.addCommands(
-                buildCommand(XInfoConsumers, newArgsBuilder().add(key).add(groupName)));
+        addCommand(XInfoConsumers, newArgsBuilder().add(key).add(groupName));
         return getThis();
     }
 
@@ -4824,10 +4699,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull ArgType consumer,
             long minIdleTime,
             @NonNull ArgType start) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        XAutoClaim,
-                        newArgsBuilder().add(key).add(group).add(consumer).add(minIdleTime).add(start)));
+        addCommand(
+                        XAutoClaim, newArgsBuilder().add(key).add(group).add(consumer).add(minIdleTime).add(start));
         return getThis();
     }
 
@@ -4865,17 +4738,15 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             long minIdleTime,
             @NonNull ArgType start,
             long count) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        XAutoClaim,
-                        newArgsBuilder()
+        addCommand(
+                        XAutoClaim, newArgsBuilder()
                                 .add(key)
                                 .add(group)
                                 .add(consumer)
                                 .add(minIdleTime)
                                 .add(start)
                                 .add(READ_COUNT_VALKEY_API)
-                                .add(count)));
+                                .add(count));
         return getThis();
     }
 
@@ -4911,16 +4782,14 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull ArgType consumer,
             long minIdleTime,
             @NonNull ArgType start) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        XAutoClaim,
-                        newArgsBuilder()
+        addCommand(
+                        XAutoClaim, newArgsBuilder()
                                 .add(key)
                                 .add(group)
                                 .add(consumer)
                                 .add(minIdleTime)
                                 .add(start)
-                                .add(JUST_ID_VALKEY_API)));
+                                .add(JUST_ID_VALKEY_API));
         return getThis();
     }
 
@@ -4958,10 +4827,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             long minIdleTime,
             @NonNull ArgType start,
             long count) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        XAutoClaim,
-                        newArgsBuilder()
+        addCommand(
+                        XAutoClaim, newArgsBuilder()
                                 .add(key)
                                 .add(group)
                                 .add(consumer)
@@ -4969,7 +4836,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
                                 .add(start)
                                 .add(READ_COUNT_VALKEY_API)
                                 .add(count)
-                                .add(JUST_ID_VALKEY_API)));
+                                .add(JUST_ID_VALKEY_API));
         return getThis();
     }
 
@@ -4985,7 +4852,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T pttl(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(PTTL, newArgsBuilder().add(key)));
+        addCommand(PTTL, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -5003,7 +4870,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T persist(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(Persist, newArgsBuilder().add(key)));
+        addCommand(Persist, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -5017,7 +4884,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      *     </code> format.
      */
     public T time() {
-        protobufBatch.addCommands(buildCommand(Time));
+        addCommand(Time);
         return getThis();
     }
 
@@ -5029,7 +4896,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - <code>UNIX TIME</code> of the last DB save executed with success.
      */
     public T lastsave() {
-        protobufBatch.addCommands(buildCommand(LastSave));
+        addCommand(LastSave);
         return getThis();
     }
 
@@ -5042,7 +4909,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      *     the event doesn't exist.
      */
     public T latencyHistory(@NonNull String event) {
-        protobufBatch.addCommands(buildCommand(LatencyHistory, newArgsBuilder().add(event)));
+        addCommand(LatencyHistory, newArgsBuilder().add(event));
         return getThis();
     }
 
@@ -5053,7 +4920,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - An array of {@link LatencyEventInfo} for the latest latency events.
      */
     public T latencyLatest() {
-        protobufBatch.addCommands(buildCommand(LatencyLatest));
+        addCommand(LatencyLatest);
         return getThis();
     }
 
@@ -5064,7 +4931,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - The number of event time series that were reset.
      */
     public T latencyReset() {
-        protobufBatch.addCommands(buildCommand(LatencyReset));
+        addCommand(LatencyReset);
         return getThis();
     }
 
@@ -5076,7 +4943,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - The number of event time series that were reset.
      */
     public T latencyReset(@NonNull String[] events) {
-        protobufBatch.addCommands(buildCommand(LatencyReset, newArgsBuilder().add(events)));
+        addCommand(LatencyReset, newArgsBuilder().add(events));
         return getThis();
     }
 
@@ -5087,7 +4954,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - <code>"OK"</code> response on success.
      */
     public T flushall() {
-        protobufBatch.addCommands(buildCommand(FlushAll));
+        addCommand(FlushAll);
         return getThis();
     }
 
@@ -5100,7 +4967,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - <code>"OK"</code> response on success.
      */
     public T flushall(FlushMode mode) {
-        protobufBatch.addCommands(buildCommand(FlushAll, newArgsBuilder().add(mode)));
+        addCommand(FlushAll, newArgsBuilder().add(mode));
         return getThis();
     }
 
@@ -5111,7 +4978,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - <code>"OK"</code> response on success.
      */
     public T flushdb() {
-        protobufBatch.addCommands(buildCommand(FlushDB));
+        addCommand(FlushDB);
         return getThis();
     }
 
@@ -5124,7 +4991,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - <code>"OK"</code> response on success.
      */
     public T flushdb(FlushMode mode) {
-        protobufBatch.addCommands(buildCommand(FlushDB, newArgsBuilder().add(mode)));
+        addCommand(FlushDB, newArgsBuilder().add(mode));
         return getThis();
     }
 
@@ -5136,7 +5003,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      *     version.
      */
     public T lolwut() {
-        protobufBatch.addCommands(buildCommand(Lolwut));
+        addCommand(Lolwut);
         return getThis();
     }
 
@@ -5157,7 +5024,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      *     version.
      */
     public T lolwut(int @NonNull [] parameters) {
-        protobufBatch.addCommands(buildCommand(Lolwut, newArgsBuilder().add(parameters)));
+        addCommand(Lolwut, newArgsBuilder().add(parameters));
         return getThis();
     }
 
@@ -5171,8 +5038,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      *     version.
      */
     public T lolwut(int version) {
-        protobufBatch.addCommands(
-                buildCommand(Lolwut, newArgsBuilder().add(VERSION_VALKEY_API).add(version)));
+        addCommand(Lolwut, newArgsBuilder().add(VERSION_VALKEY_API).add(version));
         return getThis();
     }
 
@@ -5193,9 +5059,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      *     version.
      */
     public T lolwut(int version, int @NonNull [] parameters) {
-        protobufBatch.addCommands(
-                buildCommand(
-                        Lolwut, newArgsBuilder().add(VERSION_VALKEY_API).add(version).add(parameters)));
+        addCommand(
+                        Lolwut, newArgsBuilder().add(VERSION_VALKEY_API).add(version).add(parameters));
         return getThis();
     }
 
@@ -5206,7 +5071,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - The number of keys in the currently selected database.
      */
     public T dbsize() {
-        protobufBatch.addCommands(buildCommand(DBSize));
+        addCommand(DBSize);
         return getThis();
     }
 
@@ -5222,7 +5087,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T type(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(Type, newArgsBuilder().add(key)));
+        addCommand(Type, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -5233,7 +5098,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - A random <code>key</code> from the database.
      */
     public T randomKey() {
-        protobufBatch.addCommands(buildCommand(RandomKey));
+        addCommand(RandomKey);
         return getThis();
     }
 
@@ -5251,7 +5116,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T rename(@NonNull ArgType key, @NonNull ArgType newKey) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(Rename, newArgsBuilder().add(key).add(newKey)));
+        addCommand(Rename, newArgsBuilder().add(key).add(newKey));
         return getThis();
     }
 
@@ -5268,7 +5133,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T renamenx(@NonNull ArgType key, @NonNull ArgType newKey) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(RenameNX, newArgsBuilder().add(key).add(newKey)));
+        addCommand(RenameNX, newArgsBuilder().add(key).add(newKey));
         return getThis();
     }
 
@@ -5294,8 +5159,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull ArgType pivot,
             @NonNull ArgType element) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(LInsert, newArgsBuilder().add(key).add(position).add(pivot).add(element)));
+        addCommand(LInsert, newArgsBuilder().add(key).add(position).add(pivot).add(element));
         return getThis();
     }
 
@@ -5320,7 +5184,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T brpop(@NonNull ArgType[] keys, double timeout) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(buildCommand(BRPop, newArgsBuilder().add(keys).add(timeout)));
+        addCommand(BRPop, newArgsBuilder().add(keys).add(timeout));
         return getThis();
     }
 
@@ -5338,7 +5202,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T lpushx(@NonNull ArgType key, @NonNull ArgType[] elements) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(LPushX, newArgsBuilder().add(key).add(elements)));
+        addCommand(LPushX, newArgsBuilder().add(key).add(elements));
         return getThis();
     }
 
@@ -5356,7 +5220,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T rpushx(@NonNull ArgType key, @NonNull ArgType[] elements) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(RPushX, newArgsBuilder().add(key).add(elements)));
+        addCommand(RPushX, newArgsBuilder().add(key).add(elements));
         return getThis();
     }
 
@@ -5381,7 +5245,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T blpop(@NonNull ArgType[] keys, double timeout) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(buildCommand(BLPop, newArgsBuilder().add(keys).add(timeout)));
+        addCommand(BLPop, newArgsBuilder().add(keys).add(timeout));
         return getThis();
     }
 
@@ -5410,12 +5274,10 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zrange(@NonNull ArgType key, @NonNull RangeQuery rangeQuery, boolean reverse) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZRange,
-                        newArgsBuilder()
+        addCommand(
+                        ZRange, newArgsBuilder()
                                 .add(key)
-                                .add(RangeOptions.createZRangeBaseArgs(rangeQuery, reverse, false))));
+                                .add(RangeOptions.createZRangeBaseArgs(rangeQuery, reverse, false)));
         return getThis();
     }
 
@@ -5467,12 +5329,10 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T zrangeWithScores(
             @NonNull ArgType key, @NonNull ScoredRangeQuery rangeQuery, boolean reverse) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZRange,
-                        newArgsBuilder()
+        addCommand(
+                        ZRange, newArgsBuilder()
                                 .add(key)
-                                .add(RangeOptions.createZRangeBaseArgs(rangeQuery, reverse, true))));
+                                .add(RangeOptions.createZRangeBaseArgs(rangeQuery, reverse, true)));
         return getThis();
     }
 
@@ -5516,8 +5376,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zmpop(@NonNull ArgType[] keys, @NonNull ScoreFilter modifier) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(
-                buildCommand(ZMPop, newArgsBuilder().add(keys.length).add(keys).add(modifier)));
+        addCommand(ZMPop, newArgsBuilder().add(keys.length).add(keys).add(modifier));
         return getThis();
     }
 
@@ -5540,15 +5399,13 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zmpop(@NonNull ArgType[] keys, @NonNull ScoreFilter modifier, long count) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(
-                buildCommand(
-                        ZMPop,
-                        newArgsBuilder()
+        addCommand(
+                        ZMPop, newArgsBuilder()
                                 .add(keys.length)
                                 .add(keys)
                                 .add(modifier)
                                 .add(COUNT_VALKEY_API)
-                                .add(count)));
+                                .add(count));
         return getThis();
     }
 
@@ -5577,9 +5434,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T bzmpop(
             @NonNull ArgType[] keys, @NonNull ScoreFilter modifier, double timeout) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(
-                buildCommand(
-                        BZMPop, newArgsBuilder().add(timeout).add(keys.length).add(keys).add(modifier)));
+        addCommand(
+                        BZMPop, newArgsBuilder().add(timeout).add(keys.length).add(keys).add(modifier));
         return getThis();
     }
 
@@ -5610,16 +5466,14 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T bzmpop(
             @NonNull ArgType[] keys, @NonNull ScoreFilter modifier, double timeout, long count) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(
-                buildCommand(
-                        BZMPop,
-                        newArgsBuilder()
+        addCommand(
+                        BZMPop, newArgsBuilder()
                                 .add(timeout)
                                 .add(keys.length)
                                 .add(keys)
                                 .add(modifier)
                                 .add(COUNT_VALKEY_API)
-                                .add(count)));
+                                .add(count));
         return getThis();
     }
 
@@ -5644,7 +5498,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T pfadd(@NonNull ArgType key, @NonNull ArgType[] elements) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(PfAdd, newArgsBuilder().add(key).add(elements)));
+        addCommand(PfAdd, newArgsBuilder().add(key).add(elements));
         return getThis();
     }
 
@@ -5662,7 +5516,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T pfcount(@NonNull ArgType[] keys) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(buildCommand(PfCount, newArgsBuilder().add(keys)));
+        addCommand(PfCount, newArgsBuilder().add(keys));
         return getThis();
     }
 
@@ -5681,8 +5535,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T pfmerge(@NonNull ArgType destination, @NonNull ArgType[] sourceKeys) {
         checkTypeOrThrow(destination);
-        protobufBatch.addCommands(
-                buildCommand(PfMerge, newArgsBuilder().add(destination).add(sourceKeys)));
+        addCommand(PfMerge, newArgsBuilder().add(destination).add(sourceKeys));
         return getThis();
     }
 
@@ -5699,7 +5552,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T objectEncoding(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ObjectEncoding, newArgsBuilder().add(key)));
+        addCommand(ObjectEncoding, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -5717,7 +5570,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T objectFreq(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ObjectFreq, newArgsBuilder().add(key)));
+        addCommand(ObjectFreq, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -5733,7 +5586,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T objectIdletime(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ObjectIdleTime, newArgsBuilder().add(key)));
+        addCommand(ObjectIdleTime, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -5750,7 +5603,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T objectRefcount(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ObjectRefCount, newArgsBuilder().add(key)));
+        addCommand(ObjectRefCount, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -5765,7 +5618,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T touch(@NonNull ArgType[] keys) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(buildCommand(Touch, newArgsBuilder().add(keys)));
+        addCommand(Touch, newArgsBuilder().add(keys));
         return getThis();
     }
 
@@ -5786,10 +5639,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T copy(@NonNull ArgType source, @NonNull ArgType destination, boolean replace) {
         checkTypeOrThrow(source);
-        protobufBatch.addCommands(
-                buildCommand(
-                        Copy,
-                        newArgsBuilder().add(source).add(destination).addIf(REPLACE_VALKEY_API, replace)));
+        addCommand(
+                        Copy, newArgsBuilder().add(source).add(destination).addIf(REPLACE_VALKEY_API, replace));
         return getThis();
     }
 
@@ -5851,15 +5702,13 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T copy(
             @NonNull ArgType source, @NonNull ArgType destination, long destinationDB, boolean replace) {
         checkTypeOrThrow(source);
-        protobufBatch.addCommands(
-                buildCommand(
-                        Copy,
-                        newArgsBuilder()
+        addCommand(
+                        Copy, newArgsBuilder()
                                 .add(source)
                                 .add(destination)
                                 .add(DB_VALKEY_API)
                                 .add(destinationDB)
-                                .addIf(REPLACE_VALKEY_API, replace)));
+                                .addIf(REPLACE_VALKEY_API, replace));
         return getThis();
     }
 
@@ -5876,7 +5725,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T dump(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(Dump, newArgsBuilder().add(key)));
+        addCommand(Dump, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -5895,7 +5744,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T restore(@NonNull ArgType key, long ttl, @NonNull byte[] value) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(Restore, newArgsBuilder().add(key).add(ttl).add(value)));
+        addCommand(Restore, newArgsBuilder().add(key).add(ttl).add(value));
         return getThis();
     }
 
@@ -5920,9 +5769,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull byte[] value,
             @NonNull RestoreOptions restoreOptions) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        Restore, newArgsBuilder().add(key).add(ttl).add(value).add(restoreOptions.toArgs())));
+        addCommand(
+                        Restore, newArgsBuilder().add(key).add(ttl).add(value).add(restoreOptions.toArgs()));
         return getThis();
     }
 
@@ -5938,7 +5786,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T bitcount(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(BitCount, newArgsBuilder().add(key)));
+        addCommand(BitCount, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -5958,7 +5806,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T bitcount(@NonNull ArgType key, long start) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(BitCount, newArgsBuilder().add(key).add(start)));
+        addCommand(BitCount, newArgsBuilder().add(key).add(start));
         return getThis();
     }
 
@@ -5982,8 +5830,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T bitcount(@NonNull ArgType key, long start, long end) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(BitCount, newArgsBuilder().add(key).add(start).add(end)));
+        addCommand(BitCount, newArgsBuilder().add(key).add(start).add(end));
         return getThis();
     }
 
@@ -6011,8 +5858,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T bitcount(
             @NonNull ArgType key, long start, long end, @NonNull BitmapIndexType options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(BitCount, newArgsBuilder().add(key).add(start).add(end).add(options)));
+        addCommand(BitCount, newArgsBuilder().add(key).add(start).add(end).add(options));
         return getThis();
     }
 
@@ -6038,13 +5884,11 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull Map<ArgType, GeospatialData> membersToGeospatialData,
             @NonNull GeoAddOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        GeoAdd,
-                        newArgsBuilder()
+        addCommand(
+                        GeoAdd, newArgsBuilder()
                                 .add(key)
                                 .add(options.toArgs())
-                                .add(mapGeoDataToGlideStringArray(membersToGeospatialData))));
+                                .add(mapGeoDataToGlideStringArray(membersToGeospatialData)));
         return getThis();
     }
 
@@ -6084,7 +5928,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T geopos(@NonNull ArgType key, @NonNull ArgType[] members) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(GeoPos, newArgsBuilder().add(key).add(members)));
+        addCommand(GeoPos, newArgsBuilder().add(key).add(members));
         return getThis();
     }
 
@@ -6108,10 +5952,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull ArgType member2,
             @NonNull GeoUnit geoUnit) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        GeoDist,
-                        newArgsBuilder().add(key).add(member1).add(member2).add(geoUnit.getValkeyAPI())));
+        addCommand(
+                        GeoDist, newArgsBuilder().add(key).add(member1).add(member2).add(geoUnit.getValkeyAPI()));
         return getThis();
     }
 
@@ -6132,8 +5974,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T geodist(
             @NonNull ArgType key, @NonNull ArgType member1, @NonNull ArgType member2) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(GeoDist, newArgsBuilder().add(key).add(member1).add(member2)));
+        addCommand(GeoDist, newArgsBuilder().add(key).add(member1).add(member2));
         return getThis();
     }
 
@@ -6152,7 +5993,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T geohash(@NonNull ArgType key, @NonNull ArgType[] members) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(GeoHash, newArgsBuilder().add(key).add(members)));
+        addCommand(GeoHash, newArgsBuilder().add(key).add(members));
         return getThis();
     }
 
@@ -6170,8 +6011,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T functionLoad(@NonNull ArgType libraryCode, boolean replace) {
         checkTypeOrThrow(libraryCode);
-        protobufBatch.addCommands(
-                buildCommand(FunctionLoad, newArgsBuilder().addIf(REPLACE, replace).add(libraryCode)));
+        addCommand(FunctionLoad, newArgsBuilder().addIf(REPLACE, replace).add(libraryCode));
         return getThis();
     }
 
@@ -6184,8 +6024,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - Info about all libraries and their functions.
      */
     public T functionList(boolean withCode) {
-        protobufBatch.addCommands(
-                buildCommand(FunctionList, newArgsBuilder().addIf(WITH_CODE_VALKEY_API, withCode)));
+        addCommand(FunctionList, newArgsBuilder().addIf(WITH_CODE_VALKEY_API, withCode));
         return getThis();
     }
 
@@ -6202,13 +6041,11 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T functionList(@NonNull ArgType libNamePattern, boolean withCode) {
         checkTypeOrThrow(libNamePattern);
-        protobufBatch.addCommands(
-                buildCommand(
-                        FunctionList,
-                        newArgsBuilder()
+        addCommand(
+                        FunctionList, newArgsBuilder()
                                 .add(LIBRARY_NAME_VALKEY_API)
                                 .add(libNamePattern)
-                                .addIf(WITH_CODE_VALKEY_API, withCode)));
+                                .addIf(WITH_CODE_VALKEY_API, withCode));
         return getThis();
     }
 
@@ -6230,9 +6067,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T fcall(
             @NonNull ArgType function, @NonNull ArgType[] keys, @NonNull ArgType[] arguments) {
         checkTypeOrThrow(function);
-        protobufBatch.addCommands(
-                buildCommand(
-                        FCall, newArgsBuilder().add(function).add(keys.length).add(keys).add(arguments)));
+        addCommand(
+                        FCall, newArgsBuilder().add(function).add(keys.length).add(keys).add(arguments));
         return getThis();
     }
 
@@ -6270,10 +6106,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T fcallReadOnly(
             @NonNull ArgType function, @NonNull ArgType[] keys, @NonNull ArgType[] arguments) {
         checkTypeOrThrow(function);
-        protobufBatch.addCommands(
-                buildCommand(
-                        FCallReadOnly,
-                        newArgsBuilder().add(function).add(keys.length).add(keys).add(arguments)));
+        addCommand(
+                        FCallReadOnly, newArgsBuilder().add(function).add(keys.length).add(keys).add(arguments));
         return getThis();
     }
 
@@ -6306,7 +6140,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      *     </ul>
      */
     public T functionStats() {
-        protobufBatch.addCommands(buildCommand(FunctionStats));
+        addCommand(FunctionStats);
         return getThis();
     }
 
@@ -6319,7 +6153,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - The serialized payload of all loaded libraries.
      */
     public T functionDump() {
-        protobufBatch.addCommands(buildCommand(FunctionDump));
+        addCommand(FunctionDump);
         return getThis();
     }
 
@@ -6333,7 +6167,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - <code>"OK"</code> response on success.
      */
     public T functionRestore(@NonNull byte[] payload) {
-        protobufBatch.addCommands(buildCommand(FunctionRestore, newArgsBuilder().add(payload)));
+        addCommand(FunctionRestore, newArgsBuilder().add(payload));
         return getThis();
     }
 
@@ -6348,8 +6182,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - <code>"OK"</code> response on success.
      */
     public T functionRestore(@NonNull byte[] payload, @NonNull FunctionRestorePolicy policy) {
-        protobufBatch.addCommands(
-                buildCommand(FunctionRestore, newArgsBuilder().add(payload).add(policy)));
+        addCommand(FunctionRestore, newArgsBuilder().add(payload).add(policy));
         return getThis();
     }
 
@@ -6372,8 +6205,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T setbit(@NonNull ArgType key, long offset, long value) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(SetBit, newArgsBuilder().add(key).add(offset).add(value)));
+        addCommand(SetBit, newArgsBuilder().add(key).add(offset).add(value));
         return getThis();
     }
 
@@ -6391,7 +6223,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T getbit(@NonNull ArgType key, long offset) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(GetBit, newArgsBuilder().add(key).add(offset)));
+        addCommand(GetBit, newArgsBuilder().add(key).add(offset));
         return getThis();
     }
 
@@ -6423,16 +6255,14 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull Long count,
             double timeout) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(
-                buildCommand(
-                        BLMPop,
-                        newArgsBuilder()
+        addCommand(
+                        BLMPop, newArgsBuilder()
                                 .add(timeout)
                                 .add(keys.length)
                                 .add(keys)
                                 .add(direction)
                                 .add(COUNT_FOR_LIST_VALKEY_API)
-                                .add(count)));
+                                .add(count));
         return getThis();
     }
 
@@ -6460,9 +6290,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T blmpop(
             @NonNull ArgType[] keys, @NonNull ListDirection direction, double timeout) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(
-                buildCommand(
-                        BLMPop, newArgsBuilder().add(timeout).add(keys.length).add(keys).add(direction)));
+        addCommand(
+                        BLMPop, newArgsBuilder().add(timeout).add(keys.length).add(keys).add(direction));
         return getThis();
     }
 
@@ -6480,7 +6309,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T bitpos(@NonNull ArgType key, long bit) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(BitPos, newArgsBuilder().add(key).add(bit)));
+        addCommand(BitPos, newArgsBuilder().add(key).add(bit));
         return getThis();
     }
 
@@ -6503,7 +6332,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T bitpos(@NonNull ArgType key, long bit, long start) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(BitPos, newArgsBuilder().add(key).add(bit).add(start)));
+        addCommand(BitPos, newArgsBuilder().add(key).add(bit).add(start));
         return getThis();
     }
 
@@ -6527,8 +6356,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T bitpos(@NonNull ArgType key, long bit, long start, long end) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(BitPos, newArgsBuilder().add(key).add(bit).add(start).add(end)));
+        addCommand(BitPos, newArgsBuilder().add(key).add(bit).add(start).add(end));
         return getThis();
     }
 
@@ -6559,9 +6387,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T bitpos(
             @NonNull ArgType key, long bit, long start, long end, @NonNull BitmapIndexType offsetType) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        BitPos, newArgsBuilder().add(key).add(bit).add(start).add(end).add(offsetType)));
+        addCommand(
+                        BitPos, newArgsBuilder().add(key).add(bit).add(start).add(end).add(offsetType));
         return getThis();
     }
 
@@ -6582,8 +6409,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull ArgType destination,
             @NonNull ArgType[] keys) {
         checkTypeOrThrow(destination);
-        protobufBatch.addCommands(
-                buildCommand(BitOp, newArgsBuilder().add(bitwiseOperation).add(destination).add(keys)));
+        addCommand(BitOp, newArgsBuilder().add(bitwiseOperation).add(destination).add(keys));
         return getThis();
     }
 
@@ -6605,15 +6431,13 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T lmpop(
             @NonNull ArgType[] keys, @NonNull ListDirection direction, @NonNull Long count) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(
-                buildCommand(
-                        LMPop,
-                        newArgsBuilder()
+        addCommand(
+                        LMPop, newArgsBuilder()
                                 .add(keys.length)
                                 .add(keys)
                                 .add(direction)
                                 .add(COUNT_FOR_LIST_VALKEY_API)
-                                .add(count)));
+                                .add(count));
         return getThis();
     }
 
@@ -6632,8 +6456,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T lmpop(@NonNull ArgType[] keys, @NonNull ListDirection direction) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(
-                buildCommand(LMPop, newArgsBuilder().add(keys.length).add(keys).add(direction)));
+        addCommand(LMPop, newArgsBuilder().add(keys.length).add(keys).add(direction));
         return getThis();
     }
 
@@ -6653,8 +6476,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T lset(@NonNull ArgType key, long index, @NonNull ArgType element) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(LSet, newArgsBuilder().add(key).add(index).add(element)));
+        addCommand(LSet, newArgsBuilder().add(key).add(index).add(element));
         return getThis();
     }
 
@@ -6680,9 +6502,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull ListDirection whereFrom,
             @NonNull ListDirection whereTo) {
         checkTypeOrThrow(source);
-        protobufBatch.addCommands(
-                buildCommand(
-                        LMove, newArgsBuilder().add(source).add(destination).add(whereFrom).add(whereTo)));
+        addCommand(
+                        LMove, newArgsBuilder().add(source).add(destination).add(whereFrom).add(whereTo));
         return getThis();
     }
 
@@ -6717,15 +6538,13 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull ListDirection whereTo,
             double timeout) {
         checkTypeOrThrow(source);
-        protobufBatch.addCommands(
-                buildCommand(
-                        BLMove,
-                        newArgsBuilder()
+        addCommand(
+                        BLMove, newArgsBuilder()
                                 .add(source)
                                 .add(destination)
                                 .add(whereFrom)
                                 .add(whereTo)
-                                .add(timeout)));
+                                .add(timeout));
         return getThis();
     }
 
@@ -6741,7 +6560,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T srandmember(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(SRandMember, newArgsBuilder().add(key)));
+        addCommand(SRandMember, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -6760,7 +6579,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T srandmember(@NonNull ArgType key, long count) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(SRandMember, newArgsBuilder().add(key).add(count)));
+        addCommand(SRandMember, newArgsBuilder().add(key).add(count));
         return getThis();
     }
 
@@ -6776,7 +6595,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T spop(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(SPop, newArgsBuilder().add(key)));
+        addCommand(SPop, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -6795,7 +6614,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T spopCount(@NonNull ArgType key, long count) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(SPop, newArgsBuilder().add(key).add(count)));
+        addCommand(SPop, newArgsBuilder().add(key).add(count));
         return getThis();
     }
 
@@ -6830,8 +6649,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T bitfield(@NonNull ArgType key, @NonNull BitFieldSubCommands[] subCommands) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(BitField, newArgsBuilder().add(key).add(createBitFieldArgs(subCommands))));
+        addCommand(BitField, newArgsBuilder().add(key).add(createBitFieldArgs(subCommands)));
         return getThis();
     }
 
@@ -6852,9 +6670,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T bitfieldReadOnly(
             @NonNull ArgType key, @NonNull BitFieldReadOnlySubCommands[] subCommands) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        BitFieldReadOnly, newArgsBuilder().add(key).add(createBitFieldArgs(subCommands))));
+        addCommand(
+                        BitFieldReadOnly, newArgsBuilder().add(key).add(createBitFieldArgs(subCommands)));
         return getThis();
     }
 
@@ -6866,7 +6683,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - <code>"OK"</code> response on success.
      */
     public T functionFlush() {
-        protobufBatch.addCommands(buildCommand(FunctionFlush));
+        addCommand(FunctionFlush);
         return getThis();
     }
 
@@ -6880,7 +6697,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command Response - <code>"OK"</code> response on success.
      */
     public T functionFlush(@NonNull FlushMode mode) {
-        protobufBatch.addCommands(buildCommand(FunctionFlush, newArgsBuilder().add(mode)));
+        addCommand(FunctionFlush, newArgsBuilder().add(mode));
         return getThis();
     }
 
@@ -6896,7 +6713,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T functionDelete(@NonNull ArgType libName) {
         checkTypeOrThrow(libName);
-        protobufBatch.addCommands(buildCommand(FunctionDelete, newArgsBuilder().add(libName)));
+        addCommand(FunctionDelete, newArgsBuilder().add(libName));
         return getThis();
     }
 
@@ -6916,7 +6733,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T lcs(@NonNull ArgType key1, @NonNull ArgType key2) {
         checkTypeOrThrow(key1);
-        protobufBatch.addCommands(buildCommand(LCS, newArgsBuilder().add(key1).add(key2)));
+        addCommand(LCS, newArgsBuilder().add(key1).add(key2));
         return getThis();
     }
 
@@ -6935,8 +6752,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T lcsLen(@NonNull ArgType key1, @NonNull ArgType key2) {
         checkTypeOrThrow(key1);
-        protobufBatch.addCommands(
-                buildCommand(LCS, newArgsBuilder().add(key1).add(key2).add(LEN_VALKEY_API)));
+        addCommand(LCS, newArgsBuilder().add(key1).add(key2).add(LEN_VALKEY_API));
         return getThis();
     }
 
@@ -6952,7 +6768,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T publish(@NonNull ArgType message, @NonNull ArgType channel) {
         checkTypeOrThrow(channel);
-        protobufBatch.addCommands(buildCommand(Publish, newArgsBuilder().add(channel).add(message)));
+        addCommand(Publish, newArgsBuilder().add(channel).add(message));
         return getThis();
     }
 
@@ -6965,7 +6781,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command response - An <code>Array</code> of all active channels.
      */
     public T pubsubChannels() {
-        protobufBatch.addCommands(buildCommand(PubSubChannels));
+        addCommand(PubSubChannels);
         return getThis();
     }
 
@@ -6983,7 +6799,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T pubsubChannels(@NonNull ArgType pattern) {
         checkTypeOrThrow(pattern);
-        protobufBatch.addCommands(buildCommand(PubSubChannels, newArgsBuilder().add(pattern)));
+        addCommand(PubSubChannels, newArgsBuilder().add(pattern));
         return getThis();
     }
 
@@ -7002,7 +6818,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      * @return Command response - The number of unique patterns.
      */
     public T pubsubNumPat() {
-        protobufBatch.addCommands(buildCommand(PubSubNumPat));
+        addCommand(PubSubNumPat);
         return getThis();
     }
 
@@ -7021,7 +6837,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T pubsubNumSub(@NonNull ArgType[] channels) {
         checkTypeOrThrow(channels);
-        protobufBatch.addCommands(buildCommand(PubSubNumSub, newArgsBuilder().add(channels)));
+        addCommand(PubSubNumSub, newArgsBuilder().add(channels));
         return getThis();
     }
 
@@ -7037,7 +6853,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T sunion(@NonNull ArgType[] keys) {
         checkTypeOrThrow(keys);
-        protobufBatch.addCommands(buildCommand(SUnion, newArgsBuilder().add(keys)));
+        addCommand(SUnion, newArgsBuilder().add(keys));
         return getThis();
     }
 
@@ -7065,8 +6881,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T lcsIdx(@NonNull ArgType key1, @NonNull ArgType key2) {
         checkTypeOrThrow(key1);
-        protobufBatch.addCommands(
-                buildCommand(LCS, newArgsBuilder().add(key1).add(key2).add(IDX_COMMAND_STRING)));
+        addCommand(LCS, newArgsBuilder().add(key1).add(key2).add(IDX_COMMAND_STRING));
         return getThis();
     }
 
@@ -7096,15 +6911,13 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T lcsIdx(@NonNull ArgType key1, @NonNull ArgType key2, long minMatchLen) {
         checkTypeOrThrow(key1);
-        protobufBatch.addCommands(
-                buildCommand(
-                        LCS,
-                        newArgsBuilder()
+        addCommand(
+                        LCS, newArgsBuilder()
                                 .add(key1)
                                 .add(key2)
                                 .add(IDX_COMMAND_STRING)
                                 .add(MINMATCHLEN_COMMAND_STRING)
-                                .add(minMatchLen)));
+                                .add(minMatchLen));
         return getThis();
     }
 
@@ -7133,14 +6946,12 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T lcsIdxWithMatchLen(@NonNull ArgType key1, @NonNull ArgType key2) {
         checkTypeOrThrow(key1);
-        protobufBatch.addCommands(
-                buildCommand(
-                        LCS,
-                        newArgsBuilder()
+        addCommand(
+                        LCS, newArgsBuilder()
                                 .add(key1)
                                 .add(key2)
                                 .add(IDX_COMMAND_STRING)
-                                .add(WITHMATCHLEN_COMMAND_STRING)));
+                                .add(WITHMATCHLEN_COMMAND_STRING));
         return getThis();
     }
 
@@ -7171,16 +6982,14 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T lcsIdxWithMatchLen(
             @NonNull ArgType key1, @NonNull ArgType key2, long minMatchLen) {
         checkTypeOrThrow(key1);
-        protobufBatch.addCommands(
-                buildCommand(
-                        LCS,
-                        newArgsBuilder()
+        addCommand(
+                        LCS, newArgsBuilder()
                                 .add(key1)
                                 .add(key2)
                                 .add(IDX_COMMAND_STRING)
                                 .add(MINMATCHLEN_COMMAND_STRING)
                                 .add(minMatchLen)
-                                .add(WITHMATCHLEN_COMMAND_STRING)));
+                                .add(WITHMATCHLEN_COMMAND_STRING));
         return getThis();
     }
 
@@ -7199,7 +7008,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T sort(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(Sort, newArgsBuilder().add(key)));
+        addCommand(Sort, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -7222,8 +7031,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T sort(@NonNull ArgType key, @NonNull SortOptions sortOptions) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(Sort, newArgsBuilder().add(key).add(sortOptions.toArgs())));
+        addCommand(Sort, newArgsBuilder().add(key).add(sortOptions.toArgs()));
         return getThis();
     }
 
@@ -7242,7 +7050,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T sortReadOnly(@NonNull ArgType key) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(SortReadOnly, newArgsBuilder().add(key)));
+        addCommand(SortReadOnly, newArgsBuilder().add(key));
         return getThis();
     }
 
@@ -7265,8 +7073,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T sortReadOnly(@NonNull ArgType key, @NonNull SortOptions sortOptions) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(SortReadOnly, newArgsBuilder().add(key).add(sortOptions.toArgs())));
+        addCommand(SortReadOnly, newArgsBuilder().add(key).add(sortOptions.toArgs()));
         return getThis();
     }
 
@@ -7288,8 +7095,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T sortStore(@NonNull ArgType key, @NonNull ArgType destination) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(Sort, newArgsBuilder().add(key).add(STORE_COMMAND_STRING).add(destination)));
+        addCommand(Sort, newArgsBuilder().add(key).add(STORE_COMMAND_STRING).add(destination));
         return getThis();
     }
 
@@ -7321,14 +7127,12 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T sortStore(
             @NonNull ArgType key, @NonNull ArgType destination, @NonNull SortOptions sortOptions) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        Sort,
-                        newArgsBuilder()
+        addCommand(
+                        Sort, newArgsBuilder()
                                 .add(key)
                                 .add(sortOptions.toArgs())
                                 .add(STORE_COMMAND_STRING)
-                                .add(destination)));
+                                .add(destination));
         return getThis();
     }
 
@@ -7361,9 +7165,8 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T geosearch(
             @NonNull ArgType key, @NonNull SearchOrigin searchFrom, @NonNull GeoSearchShape searchBy) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        GeoSearch, newArgsBuilder().add(key).add(searchFrom.toArgs()).add(searchBy.toArgs())));
+        addCommand(
+                        GeoSearch, newArgsBuilder().add(key).add(searchFrom.toArgs()).add(searchBy.toArgs()));
         return getThis();
     }
 
@@ -7401,14 +7204,12 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull GeoSearchShape searchBy,
             @NonNull GeoSearchResultOptions resultOptions) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        GeoSearch,
-                        newArgsBuilder()
+        addCommand(
+                        GeoSearch, newArgsBuilder()
                                 .add(key)
                                 .add(searchFrom.toArgs())
                                 .add(searchBy.toArgs())
-                                .add(resultOptions.toArgs())));
+                                .add(resultOptions.toArgs()));
         return getThis();
     }
 
@@ -7453,14 +7254,12 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull GeoSearchShape searchBy,
             @NonNull GeoSearchOptions options) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        GeoSearch,
-                        newArgsBuilder()
+        addCommand(
+                        GeoSearch, newArgsBuilder()
                                 .add(key)
                                 .add(searchFrom.toArgs())
                                 .add(searchBy.toArgs())
-                                .add(options.toArgs())));
+                                .add(options.toArgs()));
         return getThis();
     }
 
@@ -7508,15 +7307,13 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull GeoSearchOptions options,
             @NonNull GeoSearchResultOptions resultOptions) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(
-                        GeoSearch,
-                        newArgsBuilder()
+        addCommand(
+                        GeoSearch, newArgsBuilder()
                                 .add(key)
                                 .add(searchFrom.toArgs())
                                 .add(searchBy.toArgs())
                                 .add(options.toArgs())
-                                .add(resultOptions.toArgs())));
+                                .add(resultOptions.toArgs()));
         return getThis();
     }
 
@@ -7556,14 +7353,12 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull SearchOrigin searchFrom,
             @NonNull GeoSearchShape searchBy) {
         checkTypeOrThrow(destination);
-        protobufBatch.addCommands(
-                buildCommand(
-                        GeoSearchStore,
-                        newArgsBuilder()
+        addCommand(
+                        GeoSearchStore, newArgsBuilder()
                                 .add(destination)
                                 .add(source)
                                 .add(searchFrom.toArgs())
-                                .add(searchBy.toArgs())));
+                                .add(searchBy.toArgs()));
         return getThis();
     }
 
@@ -7606,15 +7401,13 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull GeoSearchShape searchBy,
             @NonNull GeoSearchResultOptions resultOptions) {
         checkTypeOrThrow(destination);
-        protobufBatch.addCommands(
-                buildCommand(
-                        GeoSearchStore,
-                        newArgsBuilder()
+        addCommand(
+                        GeoSearchStore, newArgsBuilder()
                                 .add(destination)
                                 .add(source)
                                 .add(searchFrom.toArgs())
                                 .add(searchBy.toArgs())
-                                .add(resultOptions.toArgs())));
+                                .add(resultOptions.toArgs()));
         return getThis();
     }
 
@@ -7656,15 +7449,13 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull GeoSearchShape searchBy,
             @NonNull GeoSearchStoreOptions options) {
         checkTypeOrThrow(destination);
-        protobufBatch.addCommands(
-                buildCommand(
-                        GeoSearchStore,
-                        newArgsBuilder()
+        addCommand(
+                        GeoSearchStore, newArgsBuilder()
                                 .add(destination)
                                 .add(source)
                                 .add(searchFrom.toArgs())
                                 .add(searchBy.toArgs())
-                                .add(options.toArgs())));
+                                .add(options.toArgs()));
         return getThis();
     }
 
@@ -7709,16 +7500,14 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
             @NonNull GeoSearchStoreOptions options,
             @NonNull GeoSearchResultOptions resultOptions) {
         checkTypeOrThrow(destination);
-        protobufBatch.addCommands(
-                buildCommand(
-                        GeoSearchStore,
-                        newArgsBuilder()
+        addCommand(
+                        GeoSearchStore, newArgsBuilder()
                                 .add(destination)
                                 .add(source)
                                 .add(searchFrom.toArgs())
                                 .add(searchBy.toArgs())
                                 .add(options.toArgs())
-                                .add(resultOptions.toArgs())));
+                                .add(resultOptions.toArgs()));
         return getThis();
     }
 
@@ -7738,7 +7527,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T sscan(@NonNull ArgType key, @NonNull ArgType cursor) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(SScan, newArgsBuilder().add(key).add(cursor)));
+        addCommand(SScan, newArgsBuilder().add(key).add(cursor));
         return getThis();
     }
 
@@ -7760,8 +7549,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T sscan(
             @NonNull ArgType key, @NonNull ArgType cursor, @NonNull SScanOptions sScanOptions) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(SScan, newArgsBuilder().add(key).add(cursor).add(sScanOptions.toArgs())));
+        addCommand(SScan, newArgsBuilder().add(key).add(cursor).add(sScanOptions.toArgs()));
         return getThis();
     }
 
@@ -7783,7 +7571,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T zscan(@NonNull ArgType key, @NonNull ArgType cursor) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(ZScan, newArgsBuilder().add(key).add(cursor)));
+        addCommand(ZScan, newArgsBuilder().add(key).add(cursor));
         return getThis();
     }
 
@@ -7809,8 +7597,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T zscan(
             @NonNull ArgType key, @NonNull ArgType cursor, @NonNull ZScanOptions zScanOptions) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(ZScan, newArgsBuilder().add(key).add(cursor).add(zScanOptions.toArgs())));
+        addCommand(ZScan, newArgsBuilder().add(key).add(cursor).add(zScanOptions.toArgs()));
         return getThis();
     }
 
@@ -7832,7 +7619,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      */
     public <ArgType> T hscan(@NonNull ArgType key, @NonNull ArgType cursor) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(buildCommand(HScan, newArgsBuilder().add(key).add(cursor)));
+        addCommand(HScan, newArgsBuilder().add(key).add(cursor));
         return getThis();
     }
 
@@ -7858,8 +7645,7 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
     public <ArgType> T hscan(
             @NonNull ArgType key, @NonNull ArgType cursor, @NonNull HScanOptions hScanOptions) {
         checkTypeOrThrow(key);
-        protobufBatch.addCommands(
-                buildCommand(HScan, newArgsBuilder().add(key).add(cursor).add(hScanOptions.toArgs())));
+        addCommand(HScan, newArgsBuilder().add(key).add(cursor).add(hScanOptions.toArgs()));
         return getThis();
     }
 
@@ -7877,32 +7663,23 @@ public abstract class BaseBatch<T extends BaseBatch<T>> {
      *     context of the current connection.
      */
     public T wait(long numReplicas, long timeout) {
-        protobufBatch.addCommands(buildCommand(Wait, newArgsBuilder().add(numReplicas).add(timeout)));
+        addCommand(Wait, newArgsBuilder().add(numReplicas).add(timeout));
         return getThis();
     }
 
-    /** Build protobuf {@link Command} object for given command and arguments. */
-    protected Command buildCommand(RequestType requestType) {
-        return buildCommand(requestType, emptyArgs());
+    /** Add a command with no arguments. */
+    protected void addCommand(RequestType requestType) {
+        commands.add(new BatchCommand(requestType.getNumber(), new byte[0][]));
     }
 
-    /** Build protobuf {@link Command} object for given command and arguments. */
-    protected Command buildCommand(RequestType requestType, ArgsArray args) {
-        return Command.newBuilder().setRequestType(requestType).setArgsArray(args).build();
-    }
-
-    /** Build protobuf {@link Command} object for given command and arguments. */
-    protected Command buildCommand(RequestType requestType, ArgsBuilder argsBuilder) {
-        final Command.Builder builder = Command.newBuilder();
-        builder.setRequestType(requestType);
-        CommandManager.populateCommandWithArgs(argsBuilder.toArray(), builder);
-        return builder.build();
-    }
-
-    /** Build protobuf {@link ArgsArray} object for empty arguments. */
-    protected ArgsArray emptyArgs() {
-        ArgsArray.Builder commandArgs = ArgsArray.newBuilder();
-        return commandArgs.build();
+    /** Add a command with pre-built args. */
+    protected void addCommand(RequestType requestType, ArgsBuilder argsBuilder) {
+        GlideString[] glideArgs = argsBuilder.toArray();
+        byte[][] args = new byte[glideArgs.length][];
+        for (int i = 0; i < glideArgs.length; i++) {
+            args[i] = glideArgs[i].getBytes();
+        }
+        commands.add(new BatchCommand(requestType.getNumber(), args));
     }
 
     /** Helper function for creating generic type ("ArgType") array */
