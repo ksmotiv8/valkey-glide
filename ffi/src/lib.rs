@@ -5286,7 +5286,8 @@ pub unsafe extern "C-unwind" fn close_monitor_client(client_ptr: *const c_void) 
 // Language bindings call these via their FFI mechanism (CFFI, Ruby FFI, JNI, CGO).
 // ═══════════════════════════════════════════════════════════════════════════════
 
-use glide_core::pool::{self, ClientPool, ClientState, PoolConfig, PooledClient, POOL_RUNNING};
+use glide_core::pool::{self, ClientPool, ClientState, POOL_RUNNING, PoolConfig, PooledClient};
+use glide_core::scope;
 use std::sync::atomic::Ordering as AtomicOrdering;
 
 /// Shared Tokio runtime for pool background operations (client creation, eviction).
@@ -5299,7 +5300,7 @@ static POOL_CLIENTS: std::sync::OnceLock<dashmap::DashMap<u64, PoolClientEntry>>
     std::sync::OnceLock::new();
 
 struct PoolClientEntry {
-    adapter_ptr: usize,  // *const ClientAdapter as usize (for command dispatch)
+    adapter_ptr: usize, // *const ClientAdapter as usize (for command dispatch)
     client: glide_core::client::Client,
     created_at: std::time::Instant,
 }
@@ -5398,7 +5399,8 @@ pub unsafe extern "C" fn glide_pool_create(
     let connection_request = if connection_request_ptr.is_null() || connection_request_len == 0 {
         Vec::new()
     } else {
-        unsafe { std::slice::from_raw_parts(connection_request_ptr, connection_request_len) }.to_vec()
+        unsafe { std::slice::from_raw_parts(connection_request_ptr, connection_request_len) }
+            .to_vec()
     };
 
     let config = PoolConfig {
@@ -5444,15 +5446,21 @@ pub unsafe extern "C" fn glide_pool_create(
                             pool.idle.push_back(entry);
                             pool.total_count.fetch_add(1, AtomicOrdering::AcqRel);
                             // Store adapter mapping
-                            get_pool_clients().insert(client_id, PoolClientEntry {
-                                adapter_ptr,
-                                client,
-                                created_at: std::time::Instant::now(),
-                            });
+                            get_pool_clients().insert(
+                                client_id,
+                                PoolClientEntry {
+                                    adapter_ptr,
+                                    client,
+                                    created_at: std::time::Instant::now(),
+                                },
+                            );
                         });
                     }
                     Err(e) => {
-                        logger_core::log_error_lazy!("pool", format!("Background client creation failed: {}", e));
+                        logger_core::log_error_lazy!(
+                            "pool",
+                            format!("Background client creation failed: {}", e)
+                        );
                     }
                 }
             });
@@ -5460,6 +5468,153 @@ pub unsafe extern "C" fn glide_pool_create(
     }
 
     pool_id as i64
+}
+
+/// Create a new client-instance pool with async (callback-based) clients.
+///
+/// This variant creates AsyncClient adapters suitable for Go/Java where commands
+/// are dispatched via success/failure callbacks. The callbacks passed here are used
+/// for ALL pooled clients created by this pool.
+///
+/// Returns pool_id (positive) on success, -1 on invalid config, -2 on other errors.
+///
+/// # Safety
+/// `connection_request_ptr` must point to `connection_request_len` valid bytes.
+/// `success_callback` and `failure_callback` must be valid function pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn glide_pool_create_async(
+    max_size: u32,
+    min_idle: u32,
+    idle_timeout_ms: u64,
+    request_timeout_ms: u64,
+    connection_request_ptr: *const u8,
+    connection_request_len: usize,
+    success_callback: SuccessCallback,
+    failure_callback: FailureCallback,
+) -> i64 {
+    let connection_request = if connection_request_ptr.is_null() || connection_request_len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(connection_request_ptr, connection_request_len) }
+            .to_vec()
+    };
+
+    let config = PoolConfig {
+        max_size,
+        min_idle,
+        idle_timeout: std::time::Duration::from_millis(idle_timeout_ms),
+        request_timeout: std::time::Duration::from_millis(request_timeout_ms),
+        test_on_borrow: false,
+        connection_request: connection_request.clone(),
+    };
+
+    let pool = match ClientPool::new(config) {
+        Ok(p) => p,
+        Err(_) => return -1,
+    };
+
+    let pool_id = pool::register_pool(pool);
+
+    // Spawn min_idle background client creation (async variant)
+    if min_idle > 0 {
+        let pool_arc = pool::get_pool(pool_id).unwrap();
+        for _ in 0..min_idle {
+            let pool_clone = pool_arc.clone();
+            let bytes = connection_request.clone();
+            let sc = success_callback;
+            let fc = failure_callback;
+            std::thread::spawn(move || match create_pool_client_async(&bytes, sc, fc) {
+                Ok((adapter_ptr, client)) => {
+                    let rt = get_pool_runtime();
+                    rt.block_on(async {
+                        let mut pool = pool_clone.lock().await;
+                        if pool.state.load(AtomicOrdering::Acquire) != POOL_RUNNING {
+                            return;
+                        }
+                        let client_id = pool.next_id();
+                        let entry = PooledClient {
+                            client_id,
+                            client: client.clone(),
+                            created_at: std::time::Instant::now(),
+                            last_idle_at: std::time::Instant::now(),
+                            borrowed_at: None,
+                            state: ClientState::Idle,
+                        };
+                        pool.idle.push_back(entry);
+                        pool.total_count.fetch_add(1, AtomicOrdering::AcqRel);
+                        get_pool_clients().insert(
+                            client_id,
+                            PoolClientEntry {
+                                adapter_ptr,
+                                client,
+                                created_at: std::time::Instant::now(),
+                            },
+                        );
+                    });
+                }
+                Err(e) => {
+                    logger_core::log_error_lazy!(
+                        "pool",
+                        format!("Background async client creation failed: {}", e)
+                    );
+                }
+            });
+        }
+    }
+
+    pool_id as i64
+}
+
+/// Create a GlideClient + AsyncClient ClientAdapter for the pool.
+fn create_pool_client_async(
+    connection_request_bytes: &[u8],
+    success_callback: SuccessCallback,
+    failure_callback: FailureCallback,
+) -> Result<(usize, glide_core::client::Client), String> {
+    let shared_bg = get_pool_runtime();
+
+    // Create the multi_thread runtime for async dispatch
+    let runtime = Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(1)
+        .thread_name("glide-pool-async")
+        .build()
+        .map_err(|e| format!("Runtime creation failed: {}", e))?;
+
+    // Create client on the shared background runtime
+    let client = {
+        let _guard = shared_bg.enter();
+        shared_bg.block_on(async {
+            let proto = glide_core::connection_request::ConnectionRequest::parse_from_bytes(
+                connection_request_bytes,
+            )
+            .map_err(|e| format!("Protobuf parse error: {}", e))?;
+            let req = glide_core::client::ConnectionRequest::from(proto);
+            glide_core::client::Client::new(req, None)
+                .await
+                .map_err(|e| format!("Client creation failed: {}", e))
+        })?
+    };
+
+    let core = Arc::new(CommandExecutionCore {
+        client: client.clone(),
+        client_type: ClientType::AsyncClient {
+            success_callback,
+            failure_callback,
+            allow_stack_response: false,
+        },
+    });
+
+    let adapter = Arc::new(ClientAdapter {
+        runtime,
+        pipe_client_id: std::sync::atomic::AtomicU64::new(0),
+        background_runtime: None,
+        core,
+        pubsub_callback: Arc::new(std::sync::RwLock::new(None)),
+    });
+    let ptr = Arc::into_raw(adapter) as usize;
+
+    Ok((ptr, client))
 }
 
 /// Non-blocking acquire. Returns client_id >= 0, -1 if exhausted, -2 if invalid pool.
@@ -5487,47 +5642,162 @@ pub extern "C" fn glide_pool_try_acquire(pool_id: u64) -> i64 {
                 let pool_clone = pool_arc.clone();
                 let bytes = pool.config.connection_request.clone();
                 drop(pool);
-                std::thread::spawn(move || {
-                    match create_pool_client_sync(&bytes) {
-                        Ok((adapter_ptr, client)) => {
-                            let rt = get_pool_runtime();
-                            rt.block_on(async {
-                                let mut pool = pool_clone.lock().await;
-                                if pool.state.load(AtomicOrdering::Acquire) != POOL_RUNNING {
-                                    pool.total_count.fetch_sub(1, AtomicOrdering::AcqRel);
-                                    return;
-                                }
-                                let client_id = pool.next_id();
-                                let entry = PooledClient {
-                                    client_id,
-                                    client: client.clone(),
-                                    created_at: std::time::Instant::now(),
-                                    last_idle_at: std::time::Instant::now(),
-                                    borrowed_at: None,
-                                    state: ClientState::Idle,
-                                };
-                                pool.idle.push_back(entry);
-                                get_pool_clients().insert(client_id, PoolClientEntry {
+                std::thread::spawn(move || match create_pool_client_sync(&bytes) {
+                    Ok((adapter_ptr, client)) => {
+                        let rt = get_pool_runtime();
+                        rt.block_on(async {
+                            let mut pool = pool_clone.lock().await;
+                            if pool.state.load(AtomicOrdering::Acquire) != POOL_RUNNING {
+                                pool.total_count.fetch_sub(1, AtomicOrdering::AcqRel);
+                                return;
+                            }
+                            let client_id = pool.next_id();
+                            let entry = PooledClient {
+                                client_id,
+                                client: client.clone(),
+                                created_at: std::time::Instant::now(),
+                                last_idle_at: std::time::Instant::now(),
+                                borrowed_at: None,
+                                state: ClientState::Idle,
+                            };
+                            pool.idle.push_back(entry);
+                            get_pool_clients().insert(
+                                client_id,
+                                PoolClientEntry {
                                     adapter_ptr,
                                     client,
                                     created_at: std::time::Instant::now(),
-                                });
-                            });
-                        }
-                        Err(e) => {
-                            logger_core::log_error_lazy!("pool", format!("Background creation failed: {}", e));
-                            let rt = get_pool_runtime();
-                            rt.block_on(async {
-                                let pool = pool_clone.lock().await;
-                                pool.total_count.fetch_sub(1, AtomicOrdering::AcqRel);
-                            });
-                        }
+                                },
+                            );
+                        });
+                    }
+                    Err(e) => {
+                        logger_core::log_error_lazy!(
+                            "pool",
+                            format!("Background creation failed: {}", e)
+                        );
+                        let rt = get_pool_runtime();
+                        rt.block_on(async {
+                            let pool = pool_clone.lock().await;
+                            pool.total_count.fetch_sub(1, AtomicOrdering::AcqRel);
+                        });
                     }
                 });
             }
             result
         }
         Err(_) => -1,
+    }
+}
+
+/// Blocking acquire with timeout. Waits on a condvar until a client becomes
+/// available or the timeout expires.
+///
+/// Returns client_id >= 0 on success, -1 on timeout, -2 on invalid pool.
+/// This eliminates the polling loop in language bindings — single FFI call
+/// instead of N retries.
+#[unsafe(no_mangle)]
+pub extern "C" fn glide_pool_acquire_blocking(pool_id: u64, timeout_ms: u64) -> i64 {
+    let pool_arc = match pool::get_pool(pool_id) {
+        Some(arc) => arc,
+        None => return -2,
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+
+    // Get the condvar handle (need to access it without holding the TokioMutex)
+    let notify = {
+        let rt = get_pool_runtime();
+        rt.block_on(async {
+            let pool = pool_arc.lock().await;
+            pool.release_notify.clone()
+        })
+    };
+
+    loop {
+        // Try to acquire
+        let result = {
+            let rt = get_pool_runtime();
+            rt.block_on(async {
+                match pool_arc.try_lock() {
+                    Ok(mut pool) => {
+                        let r = pool.try_acquire();
+                        if r >= 0 {
+                            let _ = GlideOpenTelemetry::record_pool_hit();
+                        }
+                        // Trigger background creation if needed
+                        if r < 0 && pool.should_create() {
+                            pool.total_count.fetch_add(1, AtomicOrdering::AcqRel);
+                            let pool_clone = pool_arc.clone();
+                            let bytes = pool.config.connection_request.clone();
+                            drop(pool);
+                            std::thread::spawn(move || {
+                                match create_pool_client_sync(&bytes) {
+                                    Ok((adapter_ptr, client)) => {
+                                        let rt = get_pool_runtime();
+                                        rt.block_on(async {
+                                            let mut p = pool_clone.lock().await;
+                                            if p.state.load(AtomicOrdering::Acquire) != POOL_RUNNING
+                                            {
+                                                p.total_count.fetch_sub(1, AtomicOrdering::AcqRel);
+                                                return;
+                                            }
+                                            let cid = p.next_id();
+                                            let entry = PooledClient {
+                                                client_id: cid,
+                                                client: client.clone(),
+                                                created_at: std::time::Instant::now(),
+                                                last_idle_at: std::time::Instant::now(),
+                                                borrowed_at: None,
+                                                state: ClientState::Idle,
+                                            };
+                                            p.idle.push_back(entry);
+                                            get_pool_clients().insert(
+                                                cid,
+                                                PoolClientEntry {
+                                                    adapter_ptr,
+                                                    client,
+                                                    created_at: std::time::Instant::now(),
+                                                },
+                                            );
+                                            // Notify waiters that a new client is available
+                                            let (_, cv) = &*p.release_notify;
+                                            cv.notify_one();
+                                        });
+                                    }
+                                    Err(_) => {
+                                        let rt = get_pool_runtime();
+                                        rt.block_on(async {
+                                            let p = pool_clone.lock().await;
+                                            p.total_count.fetch_sub(1, AtomicOrdering::AcqRel);
+                                        });
+                                    }
+                                }
+                            });
+                        }
+                        r
+                    }
+                    Err(_) => -1,
+                }
+            })
+        };
+
+        if result >= 0 {
+            return result;
+        }
+
+        // Check timeout
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            let _ = GlideOpenTelemetry::record_pool_miss();
+            return -1; // Timeout
+        }
+
+        // Wait on condvar until notified or timeout
+        let (lock, condvar) = &*notify;
+        let guard = lock.lock().unwrap();
+        let _ = condvar.wait_timeout(guard, remaining.min(std::time::Duration::from_millis(50)));
+        // Loop back to try_acquire
     }
 }
 
@@ -5580,6 +5850,28 @@ pub extern "C" fn glide_pool_get_client_ptr(client_id: u64) -> usize {
         .unwrap_or(0)
 }
 
+/// Set the pipe_client_id on a pooled client adapter.
+/// Required for async clients (Python async, Node) that use the shared pipe
+/// for response delivery. Call this after acquire, before sending commands.
+#[unsafe(no_mangle)]
+pub extern "C" fn glide_pool_set_pipe_client_id(client_id: u64, pipe_client_id: u64) -> i32 {
+    let adapter_ptr = match get_pool_clients().get(&client_id) {
+        Some(e) => e.adapter_ptr,
+        None => return -1,
+    };
+
+    // Safety: adapter_ptr was created via Arc::into_raw in create_pool_client_async.
+    unsafe {
+        Arc::increment_strong_count(adapter_ptr as *const ClientAdapter);
+        let adapter = Arc::from_raw(adapter_ptr as *const ClientAdapter);
+        adapter
+            .pipe_client_id
+            .store(pipe_client_id, std::sync::atomic::Ordering::Release);
+        std::mem::forget(adapter);
+    }
+    0
+}
+
 /// Query pool metrics. Writes idle/active/total to out pointers.
 ///
 /// # Safety
@@ -5597,11 +5889,355 @@ pub unsafe extern "C" fn glide_pool_metrics(
     };
     match pool_arc.try_lock() {
         Ok(pool) => {
-            if !idle_out.is_null() { unsafe { *idle_out = pool.idle_count(); } }
-            if !active_out.is_null() { unsafe { *active_out = pool.active_count(); } }
-            if !total_out.is_null() { unsafe { *total_out = pool.total_count.load(AtomicOrdering::Acquire); } }
+            if !idle_out.is_null() {
+                unsafe {
+                    *idle_out = pool.idle_count();
+                }
+            }
+            if !active_out.is_null() {
+                unsafe {
+                    *active_out = pool.active_count();
+                }
+            }
+            if !total_out.is_null() {
+                unsafe {
+                    *total_out = pool.total_count.load(AtomicOrdering::Acquire);
+                }
+            }
             0
         }
         Err(_) => -1,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ISOLATED EXECUTION SCOPES (Feature 2) — C-ABI FFI
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Execute a command on a scoped connection (async — non-blocking, fires callback).
+///
+/// Same wire format as `glide_scope_execute`, but returns immediately and calls
+/// `success_callback(request_id, response)` or `failure_callback(request_id, error, type)`
+/// when the command completes.
+///
+/// Suitable for Go/Java where blocking an OS thread is expensive.
+///
+/// # Safety
+/// `command_ptr` must point to `command_len` valid bytes.
+/// `success_callback` and `failure_callback` must be valid function pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn glide_scope_execute_async(
+    scope_id: u64,
+    command_ptr: *const u8,
+    command_len: usize,
+    request_id: usize,
+    success_callback: SuccessCallback,
+    failure_callback: FailureCallback,
+) -> i32 {
+    if command_ptr.is_null() || command_len == 0 {
+        return -2;
+    }
+
+    let bytes = unsafe { std::slice::from_raw_parts(command_ptr, command_len) }.to_vec();
+
+    let (cmd_name, args) = match scope::deserialize_command(&bytes) {
+        Some(p) => p,
+        None => return -2,
+    };
+
+    // Verify scope exists
+    let registry = glide_core::pool::get_scope_registry();
+    if registry.get(&scope_id).is_none() {
+        return -1;
+    }
+
+    let runtime = get_pool_runtime();
+
+    runtime.spawn(async move {
+        // Get the parent client for timeout/decompression/IAM
+        let client_registry = scope::get_client_registry();
+        let client = {
+            let pools = glide_core::pool::get_client_scope_pools();
+            let parent_id = pools
+                .iter()
+                .find(|e| {
+                    e.value()
+                        .try_lock()
+                        .map(|p| p.in_use.contains_key(&scope_id))
+                        .unwrap_or(false)
+                })
+                .map(|e| *e.key());
+
+            parent_id.and_then(|pid| client_registry.get(&pid).map(|e| e.value().clone()))
+        };
+
+        let result =
+            scope::execute_scope_command(scope_id, &cmd_name, &args, client.as_ref()).await;
+
+        match result {
+            Ok(value) => {
+                // Fast path for OK/Nil
+                let response_ptr: *const CommandResponse = match &value {
+                    Value::Okay => Box::into_raw(Box::new(CommandResponse {
+                        response_type: ResponseType::Ok,
+                        int_value: 0,
+                        float_value: 0.0,
+                        bool_value: false,
+                        string_value: std::ptr::null_mut(),
+                        string_value_len: 0,
+                        array_value: std::ptr::null_mut(),
+                        array_value_len: 0,
+                        map_key: std::ptr::null_mut(),
+                        map_value: std::ptr::null_mut(),
+                        sets_value: std::ptr::null_mut(),
+                        sets_value_len: 0,
+                        arena_ptr: std::ptr::null_mut(),
+                    })),
+                    Value::Nil => std::ptr::null(),
+                    _ => match valkey_value_to_arena_response(value, None) {
+                        Ok((ptr, _arena)) => ptr as *const CommandResponse,
+                        Err(err) => {
+                            let msg = errors::error_message(&err);
+                            let c_msg = CString::new(msg).unwrap_or_default();
+                            unsafe {
+                                failure_callback(
+                                    request_id,
+                                    c_msg.into_raw(),
+                                    errors::RequestErrorType::Unspecified,
+                                );
+                            }
+                            return;
+                        }
+                    },
+                };
+                unsafe {
+                    success_callback(request_id, response_ptr);
+                }
+            }
+            Err(err) => {
+                let error_type = errors::error_type(&err);
+                let msg = errors::error_message(&err);
+                let c_msg = CString::new(msg).unwrap_or_default();
+                unsafe {
+                    failure_callback(request_id, c_msg.into_raw(), error_type);
+                }
+            }
+        }
+    });
+
+    0 // success — callback will fire later
+}
+
+/// Pre-warm scope connections for a client.
+///
+/// Creates the scope pool (if not exists) and spawns min_idle background
+/// connection creation tasks. Call this after client creation to ensure
+/// the first scoped_connection() has a ready connection.
+///
+/// # Safety
+/// `connection_request_ptr` must point to `connection_request_len` valid bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn glide_scope_prewarm(
+    client_id: u64,
+    connection_request_ptr: *const u8,
+    connection_request_len: usize,
+    min_idle: u32,
+) {
+    let conn_bytes = if connection_request_ptr.is_null() || connection_request_len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(connection_request_ptr, connection_request_len) }
+            .to_vec()
+    };
+
+    let runtime = get_pool_runtime();
+
+    // Create the scope pool (registers it if not exists)
+    let pool = glide_core::pool::get_or_create_scope_pool(client_id, conn_bytes.clone());
+
+    // Spawn min_idle background connection creation tasks on the pool runtime
+    for _ in 0..min_idle {
+        let pool_clone = pool.clone();
+        let bytes = conn_bytes.clone();
+        let cid = client_id;
+        runtime.spawn(async move {
+            let client = scope::get_parent_client(cid).await;
+            scope::create_scope_connection(pool_clone, client.as_ref(), &bytes).await;
+        });
+    }
+}
+
+/// Acquire a scope from the client's internal scope pool.
+///
+/// Returns scope_id >= 0 on success, -1 if pool exhausted, -2 on error.
+///
+/// # Safety
+/// `connection_request_ptr` must point to `connection_request_len` valid bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn glide_scope_try_acquire(
+    client_id: u64,
+    connection_request_ptr: *const u8,
+    connection_request_len: usize,
+) -> i64 {
+    let conn_bytes = if connection_request_ptr.is_null() || connection_request_len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(connection_request_ptr, connection_request_len) }
+            .to_vec()
+    };
+
+    let runtime = get_pool_runtime();
+    scope::try_acquire_scope(client_id, conn_bytes, runtime.handle())
+}
+
+/// Release a scope back to the pool. Fire-and-forget.
+///
+/// Returns 0 on success, -1 on error (invalid scope/client).
+#[unsafe(no_mangle)]
+pub extern "C" fn glide_scope_release(scope_id: u64, client_id: u64) -> i32 {
+    let runtime = get_pool_runtime();
+    scope::release_scope(scope_id, client_id, runtime.handle())
+}
+
+/// Execute a command on a scoped connection (synchronous — blocks until result).
+///
+/// The command is serialized in the wire format:
+///   [4 bytes: cmd_name_len][cmd_name bytes][4 bytes: num_args]
+///   [4 bytes: arg1_len][arg1 bytes]...[4 bytes: argN_len][argN bytes]
+///
+/// Returns a `CommandResult*` pointer (caller must free with `free_command_result`).
+/// Returns null on error (invalid scope_id, deserialization failure).
+///
+/// # Safety
+/// `command_ptr` must point to `command_len` valid bytes.
+/// The returned pointer must be freed by the caller via `free_command_result`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn glide_scope_execute(
+    scope_id: u64,
+    command_ptr: *const u8,
+    command_len: usize,
+) -> *mut CommandResult {
+    if command_ptr.is_null() || command_len == 0 {
+        return std::ptr::null_mut();
+    }
+
+    let bytes = unsafe { std::slice::from_raw_parts(command_ptr, command_len) };
+
+    let (cmd_name, args) = match scope::deserialize_command(bytes) {
+        Some(p) => p,
+        None => return std::ptr::null_mut(),
+    };
+
+    // Verify scope exists
+    let registry = glide_core::pool::get_scope_registry();
+    if registry.get(&scope_id).is_none() {
+        return std::ptr::null_mut();
+    }
+
+    let runtime = get_pool_runtime();
+
+    // Execute synchronously — block on the async scope execution
+    let result = runtime.block_on(async {
+        // Get the parent client for timeout/decompression/IAM
+        let client_registry = scope::get_client_registry();
+        let client = {
+            let pools = glide_core::pool::get_client_scope_pools();
+            let parent_id = pools
+                .iter()
+                .find(|e| {
+                    e.value()
+                        .try_lock()
+                        .map(|p| p.in_use.contains_key(&scope_id))
+                        .unwrap_or(false)
+                })
+                .map(|e| *e.key());
+
+            parent_id.and_then(|pid| client_registry.get(&pid).map(|e| e.value().clone()))
+        };
+
+        scope::execute_scope_command(scope_id, &cmd_name, &args, client.as_ref()).await
+    });
+
+    // Convert result to CommandResult
+    // Fast path for simple responses (OK, Nil) — avoid arena allocation
+    match result {
+        Ok(Value::Okay) => {
+            let resp = Box::into_raw(Box::new(CommandResponse {
+                response_type: ResponseType::Ok,
+                int_value: 0,
+                float_value: 0.0,
+                bool_value: false,
+                string_value: std::ptr::null_mut(),
+                string_value_len: 0,
+                array_value: std::ptr::null_mut(),
+                array_value_len: 0,
+                map_key: std::ptr::null_mut(),
+                map_value: std::ptr::null_mut(),
+                sets_value: std::ptr::null_mut(),
+                sets_value_len: 0,
+                arena_ptr: std::ptr::null_mut(),
+            }));
+            Box::into_raw(Box::new(CommandResult {
+                response: resp,
+                command_error: std::ptr::null_mut(),
+                arena: std::ptr::null_mut(),
+            }))
+        }
+        Ok(Value::Nil) => {
+            let resp = Box::into_raw(Box::new(CommandResponse {
+                response_type: ResponseType::Null,
+                int_value: 0,
+                float_value: 0.0,
+                bool_value: false,
+                string_value: std::ptr::null_mut(),
+                string_value_len: 0,
+                array_value: std::ptr::null_mut(),
+                array_value_len: 0,
+                map_key: std::ptr::null_mut(),
+                map_value: std::ptr::null_mut(),
+                sets_value: std::ptr::null_mut(),
+                sets_value_len: 0,
+                arena_ptr: std::ptr::null_mut(),
+            }));
+            Box::into_raw(Box::new(CommandResult {
+                response: resp,
+                command_error: std::ptr::null_mut(),
+                arena: std::ptr::null_mut(),
+            }))
+        }
+        Ok(value) => match valkey_value_to_arena_response(value, None) {
+            Ok((response_ptr, arena_ptr)) => Box::into_raw(Box::new(CommandResult {
+                response: response_ptr,
+                command_error: std::ptr::null_mut(),
+                arena: arena_ptr,
+            })),
+            Err(err) => {
+                let msg = format!("{}", err);
+                let c_msg = CString::new(msg).unwrap_or_default();
+                let error = Box::into_raw(Box::new(CommandError {
+                    command_error_type: errors::RequestErrorType::Unspecified,
+                    command_error_message: c_msg.into_raw(),
+                }));
+                Box::into_raw(Box::new(CommandResult {
+                    response: std::ptr::null_mut(),
+                    command_error: error,
+                    arena: std::ptr::null_mut(),
+                }))
+            }
+        },
+        Err(err) => {
+            let error_type = errors::error_type(&err);
+            let msg = errors::error_message(&err);
+            let c_msg = CString::new(msg).unwrap_or_default();
+            let error = Box::into_raw(Box::new(CommandError {
+                command_error_type: error_type,
+                command_error_message: c_msg.into_raw(),
+            }));
+            Box::into_raw(Box::new(CommandResult {
+                response: std::ptr::null_mut(),
+                command_error: error,
+                arena: std::ptr::null_mut(),
+            }))
+        }
     }
 }

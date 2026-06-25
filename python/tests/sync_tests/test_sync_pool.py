@@ -91,7 +91,9 @@ class TestClientPool:
                 errors.append((idx, e))
                 results[idx] = False
 
-        threads = [threading.Thread(target=worker, args=(i,)) for i in range(num_threads)]
+        threads = [
+            threading.Thread(target=worker, args=(i,)) for i in range(num_threads)
+        ]
         for t in threads:
             t.start()
         for t in threads:
@@ -103,7 +105,9 @@ class TestClientPool:
     def test_pool_timeout_on_exhaustion(self, request):
         """Pool raises TimeoutError when exhausted within timeout."""
         config = get_standalone_config(request)
-        p = ClientPool(config, PoolConfig(max_size=1, min_idle=1, acquire_timeout_s=1.0))
+        p = ClientPool(
+            config, PoolConfig(max_size=1, min_idle=1, acquire_timeout_s=1.0)
+        )
         time.sleep(3)  # warmup
 
         # Acquire the only client

@@ -414,6 +414,8 @@ class BaseClient(CoreCommands):
         )
         conn_req.lib_name = "GlidePy"
         conn_req_bytes = conn_req.SerializeToString()
+        # Store for scoped_connection (Feature 2)
+        self._conn_req_bytes = conn_req_bytes
 
         # Create AsyncClient type
         client_type = self._ffi.new(
@@ -1020,6 +1022,110 @@ class GlideClient(BaseClient, StandaloneCommands):
     For full documentation, see
     [Valkey GLIDE Documentation](https://glide.valkey.io/how-to/client-initialization/#standalone)
     """
+
+    async def scoped_connection(self, timeout: float = 5.0) -> "AsyncIsolatedScope":
+        """
+        Acquire an isolated execution scope — a dedicated connection for operations
+        requiring per-connection state (WATCH/MULTI/EXEC, CLIENT TRACKING, blocking
+        commands).
+
+        The scope bypasses the multiplexer, executing commands on its own TCP
+        connection. Use as an async context manager for automatic release:
+
+            async with await client.scoped_connection() as scope:
+                await scope.watch("counter")
+                val = await scope.get("counter")
+                await scope.multi()
+                await scope.set("counter", str(int(val or "0") + 1))
+                result = await scope.exec()
+
+        Args:
+            timeout: Maximum seconds to wait for a scope connection (default 5.0).
+
+        Returns:
+            An AsyncIsolatedScope instance.
+
+        Raises:
+            TimeoutError: If no scope is available within the timeout.
+            ClosingError: If the client is closed.
+        """
+        import time
+        from .isolated_scope import AsyncIsolatedScope
+
+        if self._is_closed:
+            raise ClosingError("Client is closed.")
+
+        client_id = int(self._ffi.cast("uintptr_t", self._core_client))
+        conn_req_bytes = self._conn_req_bytes
+
+        loop = asyncio.get_running_loop()
+
+        def _acquire_sync():
+            deadline = time.monotonic() + timeout
+            backoff = 0.001
+            while True:
+                buf = self._ffi.from_buffer(conn_req_bytes)
+                scope_id = self._lib.glide_scope_try_acquire(
+                    client_id,
+                    self._ffi.cast("const uint8_t*", buf),
+                    len(conn_req_bytes),
+                )
+                if scope_id >= 0:
+                    return scope_id
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "Timed out waiting for isolated scope (pool exhausted)"
+                    )
+                time.sleep(min(backoff, remaining))
+                backoff = min(backoff * 2, 0.05)
+
+        scope_id = await loop.run_in_executor(None, _acquire_sync)
+
+        return AsyncIsolatedScope(
+            scope_id,
+            client_id,
+            _ASYNC_FFI,
+            self._parse_scope_response,
+        )
+
+    def _parse_scope_response(self, response_ptr) -> Optional[str]:
+        """Parse a CommandResponse pointer from a scope execution into a Python string."""
+        if response_ptr == self._ffi.NULL:
+            return None
+
+        resp = response_ptr
+        resp_type = resp.response_type
+
+        if resp_type == 0:  # Null
+            return None
+        elif resp_type == 1:  # Int
+            return str(resp.int_value)
+        elif resp_type == 2:  # Float
+            return str(resp.float_value)
+        elif resp_type == 3:  # Bool
+            return str(resp.bool_value)
+        elif resp_type == 4:  # String
+            if resp.string_value == self._ffi.NULL:
+                return None
+            return self._ffi.buffer(resp.string_value, resp.string_value_len)[:].decode("utf-8")
+        elif resp_type == 5:  # Array
+            if resp.array_value == self._ffi.NULL or resp.array_value_len == 0:
+                return None
+            results = []
+            for i in range(resp.array_value_len):
+                elem = self._parse_scope_response(resp.array_value + i)
+                results.append(elem)
+            return str(results)
+        elif resp_type == 8:  # Ok
+            return "OK"
+        elif resp_type == 9:  # Error
+            if resp.string_value != self._ffi.NULL:
+                msg = self._ffi.string(resp.string_value).decode("utf-8")
+                raise RuntimeError(f"Server error: {msg}")
+            raise RuntimeError("Server error (unknown)")
+        else:
+            return None
 
     async def get_subscriptions(
         self,

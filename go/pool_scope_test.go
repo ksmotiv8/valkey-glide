@@ -1,0 +1,417 @@
+// Copyright Valkey GLIDE Project Contributors - SPDX Identifier: Apache-2.0
+
+package glide
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/valkey-io/valkey-glide/go/v2/config"
+)
+
+func standaloneConfig() *config.ClientConfiguration {
+	return config.NewClientConfiguration().
+		WithAddress(&config.NodeAddress{Host: "localhost", Port: 6379}).
+		WithRequestTimeout(5000 * time.Millisecond)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Feature 1: ClientPool tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func TestPoolCreateAndMetrics(t *testing.T) {
+	pool, err := NewClientPool(standaloneConfig(), PoolConfig{
+		MaxSize:        3,
+		MinIdle:        2,
+		AcquireTimeout: 10 * time.Second,
+	})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	// Wait for min_idle warmup
+	time.Sleep(3 * time.Second)
+
+	assert.GreaterOrEqual(t, pool.IdleCount(), 1)
+	assert.GreaterOrEqual(t, pool.TotalCount(), 1)
+}
+
+func TestPoolAcquireAndCommands(t *testing.T) {
+	pool, err := NewClientPool(standaloneConfig(), PoolConfig{
+		MaxSize:        3,
+		MinIdle:        1,
+		AcquireTimeout: 10 * time.Second,
+	})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	time.Sleep(3 * time.Second)
+
+	ctx := context.Background()
+	clientID, err := pool.Acquire(ctx)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, clientID, int64(0))
+
+	client, err := pool.GetClient(clientID)
+	require.NoError(t, err)
+
+	// Execute commands via the PooledClient wrapper
+	key := fmt.Sprintf("go-pool-test-%d", time.Now().UnixNano())
+	_, err = client.Set(ctx, key, "hello")
+	require.NoError(t, err)
+
+	val, err := client.Get(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, "hello", val.Value())
+
+	client.Client.Del(ctx, []string{key})
+
+	// Close() on PooledClient releases back to pool (doesn't destroy connection)
+	client.Close()
+}
+
+func TestPoolReuse(t *testing.T) {
+	pool, err := NewClientPool(standaloneConfig(), PoolConfig{
+		MaxSize:        3,
+		MinIdle:        1,
+		AcquireTimeout: 10 * time.Second,
+	})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	time.Sleep(3 * time.Second)
+
+	ctx := context.Background()
+	id1, _ := pool.Acquire(ctx)
+	pool.Release(id1)
+	time.Sleep(100 * time.Millisecond)
+
+	id2, _ := pool.Acquire(ctx)
+	pool.Release(id2)
+
+	// LIFO: same client_id
+	assert.Equal(t, id1, id2)
+}
+
+func TestPoolExhaustionTimeout(t *testing.T) {
+	pool, err := NewClientPool(standaloneConfig(), PoolConfig{
+		MaxSize:        1,
+		MinIdle:        1,
+		AcquireTimeout: 10 * time.Second,
+	})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	time.Sleep(3 * time.Second)
+
+	ctx := context.Background()
+	id1, _ := pool.Acquire(ctx)
+
+	// Second acquire should timeout
+	_, err = pool.AcquireWithTimeout(ctx, 500*time.Millisecond)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "timed out")
+
+	pool.Release(id1)
+}
+
+func TestPoolConcurrentAccess(t *testing.T) {
+	pool, err := NewClientPool(standaloneConfig(), PoolConfig{
+		MaxSize:        4,
+		MinIdle:        4,
+		AcquireTimeout: 15 * time.Second,
+	})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	time.Sleep(4 * time.Second)
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	errCh := make(chan error, 8)
+
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			clientID, err := pool.Acquire(ctx)
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			client, err := pool.GetClient(clientID)
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			key := fmt.Sprintf("go-pool-concurrent-%d", idx)
+			_, err = client.Set(ctx, key, fmt.Sprintf("val-%d", idx))
+			if err != nil {
+				errCh <- err
+				return
+			}
+			client.Client.Del(ctx, []string{key})
+			client.Close() // returns to pool
+		}(i)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Fatalf("concurrent access error: %v", err)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Feature 2: IsolatedScope tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func TestScopeAcquirePingRelease(t *testing.T) {
+	client, err := NewClient(standaloneConfig())
+	require.NoError(t, err)
+	defer client.Close()
+
+	ctx := context.Background()
+	scope, err := client.ScopedConnection(ctx, 10*time.Second)
+	require.NoError(t, err)
+	assert.False(t, scope.IsReleased())
+
+	result, err := scope.Ping(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "PONG", result)
+
+	scope.Close()
+	assert.True(t, scope.IsReleased())
+}
+
+func TestScopeGetSet(t *testing.T) {
+	client, err := NewClient(standaloneConfig())
+	require.NoError(t, err)
+	defer client.Close()
+
+	ctx := context.Background()
+	key := fmt.Sprintf("go-scope-test-%d", time.Now().UnixNano())
+
+	scope, err := client.ScopedConnection(ctx, 10*time.Second)
+	require.NoError(t, err)
+	defer scope.Close()
+
+	_, err = scope.Set(ctx, key, "hello")
+	require.NoError(t, err)
+
+	val, err := scope.Get(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, "hello", val)
+
+	// Cleanup via main client
+	client.Del(ctx, []string{key})
+}
+
+func TestScopeWatchMultiExec(t *testing.T) {
+	client, err := NewClient(standaloneConfig())
+	require.NoError(t, err)
+	defer client.Close()
+
+	ctx := context.Background()
+	key := fmt.Sprintf("go-occ-%d", time.Now().UnixNano())
+	client.Set(ctx, key, "0")
+
+	scope, err := client.ScopedConnection(ctx, 10*time.Second)
+	require.NoError(t, err)
+	defer scope.Close()
+
+	_, err = scope.Watch(ctx, key)
+	require.NoError(t, err)
+
+	val, err := scope.Get(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, "0", val)
+
+	_, err = scope.Multi(ctx)
+	require.NoError(t, err)
+
+	_, err = scope.Set(ctx, key, "1")
+	require.NoError(t, err)
+
+	result, err := scope.Exec(ctx)
+	require.NoError(t, err)
+	assert.NotEmpty(t, result) // Non-empty means success
+
+	// Verify
+	storedVal, _ := client.Get(ctx, key)
+	assert.Equal(t, "1", storedVal.Value())
+	client.Del(ctx, []string{key})
+}
+
+func TestScopeRaisesAfterRelease(t *testing.T) {
+	client, err := NewClient(standaloneConfig())
+	require.NoError(t, err)
+	defer client.Close()
+
+	ctx := context.Background()
+	scope, err := client.ScopedConnection(ctx, 10*time.Second)
+	require.NoError(t, err)
+
+	scope.Close()
+
+	_, err = scope.Ping(ctx)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "released")
+}
+
+func TestScopeWatchConflictAbortsExec(t *testing.T) {
+	client, err := NewClient(standaloneConfig())
+	require.NoError(t, err)
+	defer client.Close()
+
+	ctx := context.Background()
+	key := fmt.Sprintf("go-occ-conflict-%d", time.Now().UnixNano())
+	client.Set(ctx, key, "original")
+
+	scope, err := client.ScopedConnection(ctx, 10*time.Second)
+	require.NoError(t, err)
+	defer scope.Close()
+
+	_, err = scope.Watch(ctx, key)
+	require.NoError(t, err)
+	_, err = scope.Get(ctx, key)
+	require.NoError(t, err)
+
+	// Modify externally via the main client
+	client.Set(ctx, key, "modified-externally")
+
+	_, err = scope.Multi(ctx)
+	require.NoError(t, err)
+	_, err = scope.Set(ctx, key, "from-scope")
+	require.NoError(t, err)
+
+	result, err := scope.Exec(ctx)
+	require.NoError(t, err)
+	// EXEC returns empty string when transaction is aborted (nil response)
+	assert.Empty(t, result)
+
+	// Verify external modification persists
+	val, _ := client.Get(ctx, key)
+	assert.Equal(t, "modified-externally", val.Value())
+	client.Del(ctx, []string{key})
+}
+
+func TestScopeOCCConcurrentIncrement(t *testing.T) {
+	client, err := NewClient(standaloneConfig())
+	require.NoError(t, err)
+	defer client.Close()
+
+	ctx := context.Background()
+	key := fmt.Sprintf("go-occ-counter-%d", time.Now().UnixNano())
+	client.Set(ctx, key, "0")
+
+	numGoroutines := 4
+	incrementsPerGoroutine := 10
+	expectedFinal := numGoroutines * incrementsPerGoroutine
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, numGoroutines)
+
+	for g := 0; g < numGoroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < incrementsPerGoroutine; i++ {
+				committed := false
+				for !committed {
+					scope, err := client.ScopedConnection(ctx, 10*time.Second)
+					if err != nil {
+						errCh <- err
+						return
+					}
+					scope.Watch(ctx, key)
+					val, _ := scope.Get(ctx, key)
+					current := 0
+					if val != "" {
+						fmt.Sscanf(val, "%d", &current)
+					}
+					scope.Multi(ctx)
+					scope.Set(ctx, key, fmt.Sprintf("%d", current+1))
+					result, _ := scope.Exec(ctx)
+					scope.Close()
+					if result != "" {
+						committed = true
+					}
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Fatalf("goroutine error: %v", err)
+	}
+
+	finalVal, _ := client.Get(ctx, key)
+	assert.Equal(t, fmt.Sprintf("%d", expectedFinal), finalVal.Value())
+	client.Del(ctx, []string{key})
+}
+
+func TestScopeCloseIsIdempotent(t *testing.T) {
+	client, err := NewClient(standaloneConfig())
+	require.NoError(t, err)
+	defer client.Close()
+
+	ctx := context.Background()
+	scope, err := client.ScopedConnection(ctx, 10*time.Second)
+	require.NoError(t, err)
+
+	scope.Ping(ctx)
+	scope.Close()
+	scope.Close() // Should not panic
+	assert.True(t, scope.IsReleased())
+}
+
+func TestScopePoolReuse(t *testing.T) {
+	client, err := NewClient(standaloneConfig())
+	require.NoError(t, err)
+	defer client.Close()
+
+	ctx := context.Background()
+
+	scope1, err := client.ScopedConnection(ctx, 10*time.Second)
+	require.NoError(t, err)
+	scope1.Ping(ctx)
+	scope1.Close()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Should be able to acquire again (connection reused)
+	scope2, err := client.ScopedConnection(ctx, 10*time.Second)
+	require.NoError(t, err)
+	result, err := scope2.Ping(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "PONG", result)
+	scope2.Close()
+}
+
+func TestPoolCloseRejectsAcquire(t *testing.T) {
+	pool, err := NewClientPool(standaloneConfig(), PoolConfig{
+		MaxSize:        2,
+		MinIdle:        1,
+		AcquireTimeout: 10 * time.Second,
+	})
+	require.NoError(t, err)
+
+	time.Sleep(3 * time.Second)
+	pool.Close()
+
+	ctx := context.Background()
+	_, err = pool.Acquire(ctx)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "closed")
+}

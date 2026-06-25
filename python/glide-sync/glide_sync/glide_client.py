@@ -108,6 +108,8 @@ class BaseClient(CoreCommands):
         )
         conn_req.lib_name = "GlidePySync"
         conn_req_bytes = conn_req.SerializeToString()
+        # Store for scoped_connection (Feature 2)
+        self._conn_req_bytes = conn_req_bytes
         client_type = self._ffi.new(
             "ClientType*",
             {
@@ -185,6 +187,17 @@ class BaseClient(CoreCommands):
 
             # Free the connection response to avoid memory leaks
             self._lib.free_connection_response(client_response_ptr)
+
+            # Pre-warm scope connection pool (Feature 2) so first
+            # scoped_connection() doesn't pay TCP connect latency.
+            client_id = int(self._ffi.cast("uintptr_t", self._core_client))
+            buf = self._ffi.from_buffer(self._conn_req_bytes)
+            self._lib.glide_scope_prewarm(
+                client_id,
+                self._ffi.cast("const uint8_t*", buf),
+                len(self._conn_req_bytes),
+                1,  # min_idle scopes
+            )
         else:
             raise ClosingError("Failed to create client, response pointer is NULL.")
 
@@ -1096,6 +1109,118 @@ class GlideClient(BaseClient, StandaloneCommands):
     For full documentation, see
     https://glide.valkey.io/how-to/client-initialization/#standalone
     """
+
+    def scoped_connection(self, timeout: float = 5.0) -> "IsolatedScope":
+        """
+        Acquire an isolated execution scope — a dedicated connection for operations
+        requiring per-connection state (WATCH/MULTI/EXEC, CLIENT TRACKING, blocking
+        commands).
+
+        The scope bypasses the multiplexer, executing commands on its own TCP
+        connection. Use as a context manager for automatic release:
+
+            with client.scoped_connection() as scope:
+                scope.watch("counter")
+                val = scope.get("counter")
+                scope.multi()
+                scope.set("counter", str(int(val or "0") + 1))
+                result = scope.exec()
+
+        Args:
+            timeout: Maximum seconds to wait for a scope connection (default 5.0).
+
+        Returns:
+            An IsolatedScope instance.
+
+        Raises:
+            TimeoutError: If no scope is available within the timeout.
+            ClosingError: If the client is closed.
+        """
+        import time
+        from .isolated_scope import IsolatedScope
+
+        if self._is_closed:
+            raise ClosingError("Client is closed.")
+
+        # Use the pointer address as client_id for the scope pool
+        client_id = int(self._ffi.cast("uintptr_t", self._core_client))
+        conn_req_bytes = self._conn_req_bytes
+
+        deadline = time.monotonic() + timeout
+        backoff = 0.01  # Start at 10ms (first scope needs ~500ms for TCP connect)
+
+        while True:
+            buf = self._ffi.from_buffer(conn_req_bytes)
+            scope_id = self._lib.glide_scope_try_acquire(
+                client_id,
+                self._ffi.cast("const uint8_t*", buf),
+                len(conn_req_bytes),
+            )
+
+            if scope_id >= 0:
+                return IsolatedScope(
+                    scope_id,
+                    client_id,
+                    _SYNC_FFI,
+                    self._parse_scope_response,
+                )
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    "Timed out waiting for isolated scope (pool exhausted)"
+                )
+
+            time.sleep(min(backoff, remaining))
+            backoff = min(backoff * 2, 0.5)  # Cap at 500ms
+
+    def _parse_scope_response(self, response_ptr) -> Optional[str]:
+        """Parse a CommandResponse pointer from a scope execution into a Python string."""
+        if response_ptr == self._ffi.NULL:
+            return None
+
+        resp = response_ptr
+        resp_type = resp.response_type
+
+        # Null response
+        if resp_type == 0:  # ResponseType::Null
+            return None
+        # Int
+        elif resp_type == 1:  # ResponseType::Int
+            return str(resp.int_value)
+        # Float
+        elif resp_type == 2:  # ResponseType::Float
+            return str(resp.float_value)
+        # Bool
+        elif resp_type == 3:  # ResponseType::Bool
+            return str(resp.bool_value)
+        # String
+        elif resp_type == 4:  # ResponseType::String
+            if resp.string_value == self._ffi.NULL:
+                return None
+            return self._ffi.buffer(resp.string_value, resp.string_value_len)[:].decode("utf-8")
+        # Array (for EXEC results, LRANGE, etc.)
+        elif resp_type == 5:  # ResponseType::Array
+            if resp.array_value == self._ffi.NULL or resp.array_value_len == 0:
+                return None
+            # For simple scope usage, return a string repr
+            results = []
+            for i in range(resp.array_value_len):
+                elem = self._parse_scope_response(resp.array_value + i)
+                results.append(elem)
+            return str(results)
+        # Ok
+        elif resp_type == 8:  # ResponseType::Ok
+            return "OK"
+        # Error
+        elif resp_type == 9:  # ResponseType::Error
+            if resp.string_value != self._ffi.NULL:
+                msg = self._ffi.string(resp.string_value).decode("utf-8")
+                raise RuntimeError(f"Server error: {msg}")
+            raise RuntimeError("Server error (unknown)")
+        else:
+            # Fallback for Map, Sets, etc.
+            return None
 
 
 TGlideClient = Union[GlideClient, GlideClusterClient]

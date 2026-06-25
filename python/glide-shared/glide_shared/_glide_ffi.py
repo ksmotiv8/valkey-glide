@@ -399,14 +399,35 @@ class _GlideFFI:
                 size_t connection_request_len
             );
             int64_t glide_pool_try_acquire(uint64_t pool_id);
+            int64_t glide_pool_acquire_blocking(uint64_t pool_id, uint64_t timeout_ms);
             int32_t glide_pool_release(uint64_t pool_id, uint64_t client_id);
             int32_t glide_pool_destroy(uint64_t pool_id);
             size_t glide_pool_get_client_ptr(uint64_t client_id);
+            int32_t glide_pool_set_pipe_client_id(uint64_t client_id, uint64_t pipe_client_id);
             int32_t glide_pool_metrics(
                 uint64_t pool_id,
                 uint32_t* idle_out,
                 uint32_t* active_out,
                 uint32_t* total_out
+            );
+
+            // ============== ISOLATED EXECUTION SCOPES (Feature 2) ==============
+            int64_t glide_scope_try_acquire(
+                uint64_t client_id,
+                const uint8_t* connection_request_ptr,
+                size_t connection_request_len
+            );
+            int32_t glide_scope_release(uint64_t scope_id, uint64_t client_id);
+            CommandResult* glide_scope_execute(
+                uint64_t scope_id,
+                const uint8_t* command_ptr,
+                size_t command_len
+            );
+            void glide_scope_prewarm(
+                uint64_t client_id,
+                const uint8_t* connection_request_ptr,
+                size_t connection_request_len,
+                uint32_t min_idle
             );
             """)
 

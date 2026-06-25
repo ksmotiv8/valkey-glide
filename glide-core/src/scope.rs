@@ -18,11 +18,11 @@ use crate::pool::{
 use redis::{Cmd, RedisError, RedisResult, Value};
 
 #[cfg(feature = "proto")]
-use crate::pool::{ConnectionState, ScopePool, ScopedConnection, POOL_RUNNING};
-#[cfg(feature = "proto")]
-use std::sync::atomic::Ordering;
+use crate::pool::{ConnectionState, POOL_RUNNING, ScopePool, ScopedConnection};
 #[cfg(feature = "proto")]
 use std::sync::Arc;
+#[cfg(feature = "proto")]
+use std::sync::atomic::Ordering;
 #[cfg(feature = "proto")]
 use std::time::Instant;
 #[cfg(feature = "proto")]
@@ -85,15 +85,12 @@ pub fn deserialize_command(bytes: &[u8]) -> Option<(String, Vec<Vec<u8>>)> {
 pub fn extract_key_args<'a>(cmd_name: &str, args: &[&'a [u8]]) -> Vec<&'a [u8]> {
     match cmd_name.to_uppercase().as_str() {
         // Commands with first arg as key
-        "GET" | "SET" | "DEL" | "INCR" | "DECR" | "INCRBY" | "DECRBY"
-        | "SETNX" | "SETEX" | "PSETEX" | "GETSET" | "GETDEL" | "GETEX"
-        | "APPEND" | "STRLEN" | "TYPE" | "EXISTS" | "EXPIRE" | "EXPIREAT"
-        | "TTL" | "PTTL" | "PERSIST" | "DUMP" | "RESTORE"
-        | "HGET" | "HSET" | "HDEL" | "HLEN" | "HGETALL" | "HMGET" | "HMSET"
-        | "LPUSH" | "RPUSH" | "LPOP" | "RPOP" | "LLEN" | "LRANGE"
-        | "SADD" | "SREM" | "SMEMBERS" | "SCARD" | "SISMEMBER"
-        | "ZADD" | "ZREM" | "ZRANGE" | "ZCARD" | "ZSCORE"
-        | "SUBSCRIBE" | "UNSUBSCRIBE"
+        "GET" | "SET" | "DEL" | "INCR" | "DECR" | "INCRBY" | "DECRBY" | "SETNX" | "SETEX"
+        | "PSETEX" | "GETSET" | "GETDEL" | "GETEX" | "APPEND" | "STRLEN" | "TYPE" | "EXISTS"
+        | "EXPIRE" | "EXPIREAT" | "TTL" | "PTTL" | "PERSIST" | "DUMP" | "RESTORE" | "HGET"
+        | "HSET" | "HDEL" | "HLEN" | "HGETALL" | "HMGET" | "HMSET" | "LPUSH" | "RPUSH" | "LPOP"
+        | "RPOP" | "LLEN" | "LRANGE" | "SADD" | "SREM" | "SMEMBERS" | "SCARD" | "SISMEMBER"
+        | "ZADD" | "ZREM" | "ZRANGE" | "ZCARD" | "ZSCORE" | "SUBSCRIBE" | "UNSUBSCRIBE"
         | "BLPOP" | "BRPOP" | "BLMOVE" => {
             if !args.is_empty() {
                 vec![args[0]]
@@ -108,10 +105,11 @@ pub fn extract_key_args<'a>(cmd_name: &str, args: &[&'a [u8]]) -> Vec<&'a [u8]> 
         // MSET: keys at even positions (key, value, key, value, ...)
         "MSET" | "MSETNX" => args.iter().step_by(2).copied().collect(),
         // Commands with no keys
-        "MULTI" | "EXEC" | "DISCARD" | "UNWATCH" | "PING" | "SELECT"
-        | "AUTH" | "CLIENT" | "INFO" | "DBSIZE" | "FLUSHDB" | "FLUSHALL"
-        | "RESET" | "QUIT" | "COMMAND" | "CONFIG" | "CLUSTER" | "TIME"
-        | "WAIT" | "OBJECT" | "DEBUG" | "SLOWLOG" | "LATENCY" | "MEMORY" => vec![],
+        "MULTI" | "EXEC" | "DISCARD" | "UNWATCH" | "PING" | "SELECT" | "AUTH" | "CLIENT"
+        | "INFO" | "DBSIZE" | "FLUSHDB" | "FLUSHALL" | "RESET" | "QUIT" | "COMMAND" | "CONFIG"
+        | "CLUSTER" | "TIME" | "WAIT" | "OBJECT" | "DEBUG" | "SLOWLOG" | "LATENCY" | "MEMORY" => {
+            vec![]
+        }
         // Default: assume first arg is a key (safe approximation for unknown commands)
         _ => {
             if !args.is_empty() {
@@ -192,7 +190,10 @@ pub async fn execute_scope_command(
 
     // Execute via Client (gets timeout, decompression, IAM refresh) or raw fallback
     match client {
-        Some(c) => c.send_command_on_connection(&cmd, &mut conn.connection).await,
+        Some(c) => {
+            c.send_command_on_connection(&cmd, &mut conn.connection)
+                .await
+        }
         None => conn.connection.send_packed_command(&cmd).await,
     }
 }
@@ -246,7 +247,11 @@ pub async fn create_scope_connection(
                 Some(a) => a,
                 None => return,
             };
-            let port = if addr.port == 0 { 6379 } else { addr.port as u16 };
+            let port = if addr.port == 0 {
+                6379
+            } else {
+                addr.port as u16
+            };
             format!("{}://{}:{}", scheme, &addr.host, port)
         }
     };
@@ -308,8 +313,14 @@ pub fn try_acquire_scope(
     connection_request_bytes: Vec<u8>,
     runtime: &tokio::runtime::Handle,
 ) -> i64 {
-    let scope_pool =
-        crate::pool::get_or_create_scope_pool(client_id, connection_request_bytes.clone());
+    // Fast path: check if scope pool exists before cloning bytes
+    let scope_pool = {
+        let pools = crate::pool::get_client_scope_pools();
+        match pools.get(&client_id) {
+            Some(existing) => existing.value().clone(),
+            None => crate::pool::get_or_create_scope_pool(client_id, connection_request_bytes),
+        }
+    };
     let registry = get_scope_registry();
 
     match scope_pool.try_lock() {
@@ -324,14 +335,8 @@ pub fn try_acquire_scope(
                 let conn_bytes = pool.connection_request_bytes.clone();
                 let parent_client_id = pool.parent_client_id;
                 runtime.spawn(async move {
-                    // Get the parent client for cluster-aware address resolution
                     let client = get_parent_client(parent_client_id).await;
-                    create_scope_connection(
-                        pool_clone,
-                        client.as_ref(),
-                        &conn_bytes,
-                    )
-                    .await;
+                    create_scope_connection(pool_clone, client.as_ref(), &conn_bytes).await;
                 });
             }
             result
@@ -383,7 +388,7 @@ pub fn release_scope(scope_id: u64, client_id: u64, runtime: &tokio::runtime::Ha
 /// For now, we use the scope pool's parent_client_id to look up from the
 /// global CLIENT_REGISTRY that language bindings populate.
 #[cfg(feature = "proto")]
-async fn get_parent_client(client_id: u64) -> Option<Client> {
+pub async fn get_parent_client(client_id: u64) -> Option<Client> {
     let registry = get_client_registry();
     registry.get(&client_id).map(|e| e.value().clone())
 }

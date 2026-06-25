@@ -25,7 +25,7 @@ Usage:
 """
 
 import threading
-import time
+
 from dataclasses import dataclass
 from typing import Optional
 
@@ -129,7 +129,8 @@ class ClientPool:
         """
         Acquire a client_id from the Rust pool.
 
-        Retries with exponential backoff until a client is available or timeout.
+        Blocks in Rust using a condvar until a client is available or timeout.
+        Single FFI call — no polling loop.
 
         Returns:
             client_id (positive integer) for use with borrow() or get_client().
@@ -144,23 +145,14 @@ class ClientPool:
         timeout = (
             timeout if timeout is not None else self._pool_config.acquire_timeout_s
         )
-        deadline = time.monotonic() + timeout
-        backoff_ms = 1.0
+        timeout_ms = int(timeout * 1000)
 
-        while time.monotonic() < deadline:
-            client_id = self._lib.glide_pool_try_acquire(self._pool_id)
+        client_id = self._lib.glide_pool_acquire_blocking(self._pool_id, timeout_ms)
 
-            if client_id >= 0:
-                return client_id
-            if client_id == -2:
-                raise RuntimeError("Invalid pool_id — pool was destroyed")
-
-            remaining = deadline - time.monotonic()
-            sleep_s = min(backoff_ms / 1000.0, max(remaining, 0))
-            if sleep_s <= 0:
-                break
-            time.sleep(sleep_s)
-            backoff_ms = min(backoff_ms * 2, 50.0)
+        if client_id >= 0:
+            return client_id
+        if client_id == -2:
+            raise RuntimeError("Invalid pool_id — pool was destroyed")
 
         raise TimeoutError(
             f"Pool exhausted: could not acquire client within {timeout}s"

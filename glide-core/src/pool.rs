@@ -110,6 +110,8 @@ pub struct ClientPool {
     pub total_count: AtomicU32,
     /// Pool lifecycle state.
     pub state: AtomicU8,
+    /// Condvar notified when a client is returned to idle (for blocking acquire).
+    pub release_notify: Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
 }
 
 impl ClientPool {
@@ -133,6 +135,7 @@ impl ClientPool {
             in_use: DashMap::new(),
             total_count: AtomicU32::new(0),
             state: AtomicU8::new(POOL_RUNNING),
+            release_notify: Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new())),
         })
     }
 
@@ -221,11 +224,29 @@ impl ClientPool {
         entry.last_idle_at = Instant::now();
         entry.borrowed_at = None;
         self.idle.push_back(entry);
+
+        // Notify any threads waiting in blocking acquire
+        let (_, condvar) = &*self.release_notify;
+        condvar.notify_one();
+
         true
     }
 
     /// Destroy the pool — drop all clients.
     pub fn destroy(&mut self) {
+        // Warn if any clients are still borrowed (likely leak)
+        let in_use_count = self.in_use.len();
+        if in_use_count > 0 {
+            logger_core::log_warn(
+                "pool",
+                &format!(
+                    "Pool destroyed with {} client(s) still borrowed — possible connection leak. \
+                     Ensure all acquired clients are released before closing the pool.",
+                    in_use_count
+                ),
+            );
+        }
+
         self.state.store(POOL_CLOSED, Ordering::Release);
         self.idle.clear();
         self.in_use.clear();
@@ -385,16 +406,22 @@ pub fn update_state_for_command(state: &mut ConnectionState, cmd: &str, args: &[
 /// Configuration for per-client scope pool.
 pub struct ScopePoolConfig {
     pub max_total: u32,
+    pub min_idle: u32,
     pub idle_timeout: Duration,
     pub request_timeout: Duration,
+    /// If true, send PING on borrow to verify connection health.
+    /// Adds one round-trip per acquire but catches stale connections early.
+    pub test_on_borrow: bool,
 }
 
 impl Default for ScopePoolConfig {
     fn default() -> Self {
         Self {
             max_total: 64,
+            min_idle: 1,
             idle_timeout: Duration::from_secs(30),
             request_timeout: Duration::from_secs(5),
+            test_on_borrow: false,
         }
     }
 }
@@ -531,13 +558,11 @@ impl ScopePool {
                     drop(conn);
                     self.idle.push_back(idle_conn);
                 } else {
-                    // Dirty state — spawn async cleanup (UNSUBSCRIBE, DISCARD, etc.)
-                    // After successful cleanup, return the connection to the idle pool.
+                    // Dirty state — pipeline all cleanup commands in a single round-trip.
+                    // If any command fails or the pipeline times out, discard the connection.
                     let conn_arc = entry.connection.clone();
                     let request_timeout = self.config.request_timeout;
 
-                    // We need the pool Arc to re-insert after cleanup.
-                    // The caller must provide it via the scope pool registry.
                     let client_id = self.parent_client_id;
                     let pools = get_client_scope_pools();
                     let pool_arc = pools.get(&client_id).map(|p| p.value().clone());
@@ -545,75 +570,90 @@ impl ScopePool {
                     tokio::spawn(async move {
                         let mut guard = conn_arc.lock().await;
                         let timeout = request_timeout * 2;
-                        let cleanup_result = tokio::time::timeout(timeout, async {
-                            if guard.state.has_subscriptions() {
-                                let mut channels = Vec::new();
-                                let mut patterns = Vec::new();
-                                let mut sharded = Vec::new();
-                                for sub in &guard.state.subscriptions {
-                                    match sub {
-                                        ScopeSubscription::Channel(c) => channels.push(c.clone()),
-                                        ScopeSubscription::Pattern(p) => patterns.push(p.clone()),
-                                        ScopeSubscription::ShardedChannel(s) => {
-                                            sharded.push(s.clone())
-                                        }
-                                    }
-                                }
-                                if !channels.is_empty() {
-                                    let mut cmd = redis::Cmd::new();
-                                    cmd.arg("UNSUBSCRIBE");
-                                    for c in &channels {
-                                        cmd.arg(c.as_slice());
-                                    }
-                                    let _ = guard.connection.send_packed_command(&cmd).await;
-                                }
-                                if !patterns.is_empty() {
-                                    let mut cmd = redis::Cmd::new();
-                                    cmd.arg("PUNSUBSCRIBE");
-                                    for p in &patterns {
-                                        cmd.arg(p.as_slice());
-                                    }
-                                    let _ = guard.connection.send_packed_command(&cmd).await;
-                                }
-                                if !sharded.is_empty() {
-                                    let mut cmd = redis::Cmd::new();
-                                    cmd.arg("SUNSUBSCRIBE");
-                                    for s in &sharded {
-                                        cmd.arg(s.as_slice());
-                                    }
-                                    let _ = guard.connection.send_packed_command(&cmd).await;
-                                }
-                            }
-                            if guard.state.multi_active {
-                                let _ = guard
-                                    .connection
-                                    .send_packed_command(&redis::Cmd::new().arg("DISCARD"))
-                                    .await;
-                            } else if guard.state.watch_active {
-                                let _ = guard
-                                    .connection
-                                    .send_packed_command(&redis::Cmd::new().arg("UNWATCH"))
-                                    .await;
-                            }
-                            if guard.state.tracking_enabled {
-                                let _ = guard
-                                    .connection
-                                    .send_packed_command(
-                                        &redis::Cmd::new().arg("CLIENT").arg("TRACKING").arg("OFF"),
-                                    )
-                                    .await;
-                            }
-                            if guard.state.db_selected != 0 {
-                                let _ = guard
-                                    .connection
-                                    .send_packed_command(&redis::Cmd::new().arg("SELECT").arg("0"))
-                                    .await;
-                            }
-                        })
-                        .await;
 
-                        // If cleanup succeeded and we have a pool reference, return to idle.
-                        if cleanup_result.is_ok() {
+                        // Build a single pipeline with all cleanup commands
+                        let mut pipe = redis::Pipeline::new();
+                        let mut cmd_count = 0;
+
+                        // DISCARD (implicitly unwatches) or UNWATCH
+                        if guard.state.multi_active {
+                            pipe.cmd("DISCARD");
+                            cmd_count += 1;
+                        } else if guard.state.watch_active {
+                            pipe.cmd("UNWATCH");
+                            cmd_count += 1;
+                        }
+
+                        // Subscription cleanup
+                        if guard.state.has_subscriptions() {
+                            let mut channels = Vec::new();
+                            let mut patterns = Vec::new();
+                            let mut sharded = Vec::new();
+                            for sub in &guard.state.subscriptions {
+                                match sub {
+                                    ScopeSubscription::Channel(c) => channels.push(c.clone()),
+                                    ScopeSubscription::Pattern(p) => patterns.push(p.clone()),
+                                    ScopeSubscription::ShardedChannel(s) => sharded.push(s.clone()),
+                                }
+                            }
+                            if !channels.is_empty() {
+                                let mut cmd = redis::Cmd::new();
+                                cmd.arg("UNSUBSCRIBE");
+                                for c in &channels {
+                                    cmd.arg(c.as_slice());
+                                }
+                                pipe.add_command(cmd);
+                                cmd_count += 1;
+                            }
+                            if !patterns.is_empty() {
+                                let mut cmd = redis::Cmd::new();
+                                cmd.arg("PUNSUBSCRIBE");
+                                for p in &patterns {
+                                    cmd.arg(p.as_slice());
+                                }
+                                pipe.add_command(cmd);
+                                cmd_count += 1;
+                            }
+                            if !sharded.is_empty() {
+                                let mut cmd = redis::Cmd::new();
+                                cmd.arg("SUNSUBSCRIBE");
+                                for s in &sharded {
+                                    cmd.arg(s.as_slice());
+                                }
+                                pipe.add_command(cmd);
+                                cmd_count += 1;
+                            }
+                        }
+
+                        // CLIENT TRACKING OFF
+                        if guard.state.tracking_enabled {
+                            pipe.cmd("CLIENT").arg("TRACKING").arg("OFF");
+                            cmd_count += 1;
+                        }
+
+                        // SELECT 0 (reset database)
+                        if guard.state.db_selected != 0 {
+                            pipe.cmd("SELECT").arg("0");
+                            cmd_count += 1;
+                        }
+
+                        // Send the entire pipeline as one round-trip with timeout
+                        let cleanup_result = if cmd_count > 0 {
+                            tokio::time::timeout(
+                                timeout,
+                                guard.connection.send_packed_commands(&pipe, 0, cmd_count),
+                            )
+                            .await
+                        } else {
+                            // No cleanup needed (shouldn't reach here, but handle gracefully)
+                            Ok(Ok(vec![]))
+                        };
+
+                        // If cleanup succeeded, return connection to idle.
+                        // If any error (timeout, command failure), discard the connection.
+                        let success = matches!(cleanup_result, Ok(Ok(_)));
+
+                        if success {
                             if let Some(pool_arc) = pool_arc {
                                 let idle_conn = ScopedConnection {
                                     scope_id: guard.scope_id,
@@ -629,16 +669,14 @@ impl ScopePool {
                                 let mut pool = pool_arc.lock().await;
                                 if pool.state.load(Ordering::Acquire) == POOL_RUNNING {
                                     pool.idle.push_back(idle_conn);
-                                    // total_count was never decremented — connection is back in pool
                                 } else {
                                     pool.total_count.fetch_sub(1, Ordering::AcqRel);
                                 }
                             } else {
-                                // No pool reference — discard connection
                                 drop(guard);
                             }
                         } else {
-                            // Cleanup timed out — discard the connection
+                            // Cleanup failed — discard the connection entirely
                             drop(guard);
                             if let Some(pool_arc) = pool_arc {
                                 let pool = pool_arc.lock().await;
@@ -692,21 +730,30 @@ pub fn get_client_scope_pools() -> &'static DashMap<u64, Arc<TokioMutex<ScopePoo
 }
 
 /// Get or create a scope pool for a client (atomic via DashMap entry API).
+/// On first creation, spawns `min_idle` background connection tasks.
 pub fn get_or_create_scope_pool(
     client_id: u64,
     connection_request_bytes: Vec<u8>,
 ) -> Arc<TokioMutex<ScopePool>> {
-    get_client_scope_pools()
-        .entry(client_id)
-        .or_insert_with(|| {
-            Arc::new(TokioMutex::new(ScopePool::new(
-                ScopePoolConfig::default(),
-                connection_request_bytes,
-                client_id,
-            )))
-        })
-        .value()
-        .clone()
+    let pools = get_client_scope_pools();
+    // Fast path: pool already exists
+    if let Some(existing) = pools.get(&client_id) {
+        return existing.value().clone();
+    }
+
+    // Slow path: create pool and pre-warm
+    let config = ScopePoolConfig::default();
+    let min_idle = config.min_idle;
+    let pool = Arc::new(TokioMutex::new(ScopePool::new(
+        config,
+        connection_request_bytes.clone(),
+        client_id,
+    )));
+
+    let inserted = pools.entry(client_id).or_insert_with(|| pool.clone());
+    let result = inserted.value().clone();
+
+    result
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
