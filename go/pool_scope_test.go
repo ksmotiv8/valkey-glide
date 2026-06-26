@@ -430,3 +430,163 @@ func TestPoolCloseRejectsAcquire(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "closed")
 }
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Scope Connection Modifier Parity Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func compressedConfig() *config.ClientConfiguration {
+	compressionConfig := config.NewCompressionConfiguration().
+		WithBackend(config.ZSTD).
+		WithMinCompressionSize(64)
+	return config.NewClientConfiguration().
+		WithAddress(&config.NodeAddress{Host: "localhost", Port: 6379}).
+		WithRequestTimeout(5000 * time.Millisecond).
+		WithCompressionConfiguration(compressionConfig)
+}
+
+func TestScopeCompressionWritesParity(t *testing.T) {
+	// Client with compression
+	compressedClient, err := NewClient(compressedConfig())
+	require.NoError(t, err)
+	defer compressedClient.Close()
+
+	// Client without compression (raw)
+	rawClient, err := NewClient(standaloneConfig())
+	require.NoError(t, err)
+	defer rawClient.Close()
+
+	ctx := context.Background()
+	key := fmt.Sprintf("go-scope-compress-%d", time.Now().UnixNano())
+	largeValue := ""
+	for i := 0; i < 500; i++ {
+		largeValue += "A"
+	}
+
+	// Write via scoped connection (should compress)
+	scope, err := compressedClient.ScopedConnection(ctx, 10*time.Second)
+	require.NoError(t, err)
+	_, err = scope.Set(ctx, key, largeValue)
+	require.NoError(t, err)
+	scope.Close()
+
+	// Read with same client (decompresses) — should match
+	val, err := compressedClient.Get(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, largeValue, val.Value())
+
+	// Read with raw client (no compression) — should differ
+	rawVal, err := rawClient.Get(ctx, key)
+	require.NoError(t, err)
+	assert.NotEqual(t, largeValue, rawVal.Value(),
+		"Value stored via compressed scope should be compressed in Valkey")
+
+	compressedClient.Del(ctx, []string{key})
+}
+
+func TestScopeCompressionReadsParity(t *testing.T) {
+	compressedClient, err := NewClient(compressedConfig())
+	require.NoError(t, err)
+	defer compressedClient.Close()
+
+	ctx := context.Background()
+	key := fmt.Sprintf("go-scope-read-compress-%d", time.Now().UnixNano())
+	value := ""
+	for i := 0; i < 50; i++ {
+		value += "CompressibleData_"
+	}
+
+	// Write via parent client (compressed)
+	compressedClient.Set(ctx, key, value)
+
+	// Read via scoped connection — should decompress correctly
+	scope, err := compressedClient.ScopedConnection(ctx, 10*time.Second)
+	require.NoError(t, err)
+	retrieved, err := scope.Get(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, value, retrieved)
+	scope.Close()
+
+	compressedClient.Del(ctx, []string{key})
+}
+
+func TestScopeDatabaseInheritance(t *testing.T) {
+	// Client configured for database 2
+	cfg := config.NewClientConfiguration().
+		WithAddress(&config.NodeAddress{Host: "localhost", Port: 6379}).
+		WithRequestTimeout(5000 * time.Millisecond).
+		WithDatabaseId(2)
+
+	client, err := NewClient(cfg)
+	require.NoError(t, err)
+	defer client.Close()
+
+	ctx := context.Background()
+	key := fmt.Sprintf("go-scope-db2-%d", time.Now().UnixNano())
+
+	// Write via scope on database 2
+	scope, err := client.ScopedConnection(ctx, 10*time.Second)
+	require.NoError(t, err)
+	_, err = scope.Set(ctx, key, "on-db2")
+	require.NoError(t, err)
+	val, err := scope.Get(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, "on-db2", val)
+	scope.Close()
+
+	// Parent client (also on db 2) should see the key
+	parentVal, err := client.Get(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, "on-db2", parentVal.Value())
+
+	// A client on database 0 should NOT see the key
+	db0Client, err := NewClient(standaloneConfig())
+	require.NoError(t, err)
+	defer db0Client.Close()
+	db0Val, err := db0Client.Get(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, "", db0Val.Value(), "Key on db2 should not be visible on db0")
+
+	client.Del(ctx, []string{key})
+}
+
+func TestScopeReleaseResetsDatabase(t *testing.T) {
+	client, err := NewClient(standaloneConfig())
+	require.NoError(t, err)
+	defer client.Close()
+
+	ctx := context.Background()
+	key := fmt.Sprintf("go-scope-db-reset-%d", time.Now().UnixNano())
+
+	// First scope: SELECT to db 4 and write
+	scope1, err := client.ScopedConnection(ctx, 10*time.Second)
+	require.NoError(t, err)
+	_, err = scope1.ExecuteCommand(ctx, "SELECT", "4")
+	require.NoError(t, err)
+	_, err = scope1.Set(ctx, key, "on-db4")
+	require.NoError(t, err)
+	scope1.Close()
+
+	// Allow async cleanup
+	time.Sleep(300 * time.Millisecond)
+
+	// Second scope: should be on db 0 (reset happened)
+	scope2, err := client.ScopedConnection(ctx, 10*time.Second)
+	require.NoError(t, err)
+	val, err := scope2.Get(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, "", val, "Scope release should reset database — second scope should be on db 0")
+	scope2.Close()
+
+	// Cleanup key on db 4
+	cleanupCfg := config.NewClientConfiguration().
+		WithAddress(&config.NodeAddress{Host: "localhost", Port: 6379}).
+		WithRequestTimeout(5000 * time.Millisecond).
+		WithDatabaseId(4)
+	cleanupClient, _ := NewClient(cleanupCfg)
+	if cleanupClient != nil {
+		cleanupClient.Del(ctx, []string{key})
+		cleanupClient.Close()
+	}
+}
