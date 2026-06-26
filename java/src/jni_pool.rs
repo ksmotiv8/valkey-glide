@@ -144,85 +144,8 @@ pub extern "system" fn Java_glide_ffi_resolvers_GlidePoolResolver_glidePoolRelea
         None => return -1,
     };
 
-    let cid = client_id as u64;
-    let pool_clone = pool_arc.clone();
-
-    // Take the client out of in_use (non-blocking fast path)
-    let (entry, configured_db) = match pool_arc.try_lock() {
-        Ok(mut pool) => {
-            let configured_db = pool.config.configured_database_id;
-            match pool.take_for_release(cid) {
-                Some(e) => (e, configured_db),
-                None => return -1,
-            }
-        }
-        Err(_) => {
-            // Lock contended — do everything async
-            let runtime = get_runtime();
-            runtime.spawn(async move {
-                let mut pool = pool_clone.lock().await;
-                let configured_db = pool.config.configured_database_id;
-                if let Some(mut entry) = pool.take_for_release(cid) {
-                    let reset_result = tokio::time::timeout(
-                        pool.config.request_timeout * 2,
-                        entry.client.reset_connection_state(configured_db),
-                    )
-                    .await;
-                    match reset_result {
-                        Ok(Ok(_)) => pool.return_to_idle(entry),
-                        _ => pool.discard_client(),
-                    }
-                }
-            });
-            return 0;
-        }
-    };
-
-    // Got the entry synchronously — spawn async state reset
     let runtime = get_runtime();
-    runtime.spawn(async move {
-        let mut entry = entry;
-        let pool_for_guard = pool_clone.clone();
-
-        // Safety: if this task is cancelled, decrement total_count to prevent slot leak
-        struct LeakGuard {
-            pool: Option<std::sync::Arc<tokio::sync::Mutex<glide_core::pool::ClientPool>>>,
-        }
-        impl Drop for LeakGuard {
-            fn drop(&mut self) {
-                if let Some(pool_arc) = self.pool.take() {
-                    if let Ok(mut pool) = pool_arc.try_lock() {
-                        pool.discard_client();
-                    } else {
-                        pool_arc.blocking_lock().discard_client();
-                    }
-                }
-            }
-        }
-        let mut guard = LeakGuard {
-            pool: Some(pool_for_guard),
-        };
-
-        let timeout_duration = {
-            let pool = pool_clone.lock().await;
-            pool.config.request_timeout * 2
-        };
-        let reset_result = tokio::time::timeout(
-            timeout_duration,
-            entry.client.reset_connection_state(configured_db),
-        )
-        .await;
-
-        // Disarm the guard — we handle the outcome explicitly
-        guard.pool = None;
-
-        let mut pool = pool_clone.lock().await;
-        match reset_result {
-            Ok(Ok(_)) => pool.return_to_idle(entry),
-            _ => pool.discard_client(),
-        }
-    });
-
+    runtime.spawn(pool::release_client_async(pool_arc, client_id as u64));
     0
 }
 

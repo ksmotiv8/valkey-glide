@@ -287,6 +287,71 @@ impl ClientPool {
     }
 }
 
+/// Async release of a pooled client with state reset and leak protection.
+///
+/// This is the shared implementation used by all language bindings (FFI, JNI).
+/// It performs:
+/// 1. Takes the client out of `in_use`
+/// 2. Sends DISCARD + SELECT (batched reset) with a timeout of 2× request_timeout
+/// 3. Returns the client to idle on success, or discards it on failure
+/// 4. A `LeakGuard` ensures `discard_client()` is called if the future is cancelled
+///
+/// Call this from a spawned task. The pool_arc should already be cloned for the task.
+pub async fn release_client_async(pool_arc: Arc<TokioMutex<ClientPool>>, client_id: u64) {
+    let (mut entry, configured_db, timeout_duration) = {
+        let mut pool = pool_arc.lock().await;
+        let configured_db = pool.config.configured_database_id;
+        let timeout = pool.config.request_timeout * 2;
+        match pool.take_for_release(client_id) {
+            Some(e) => (e, configured_db, timeout),
+            None => return,
+        }
+    };
+
+    // Safety: if this task is cancelled after take_for_release but before
+    // return_to_idle/discard_client, decrement total_count to prevent slot leak.
+    let pool_for_guard = pool_arc.clone();
+    struct LeakGuard {
+        pool: Option<Arc<TokioMutex<ClientPool>>>,
+    }
+    impl Drop for LeakGuard {
+        fn drop(&mut self) {
+            if let Some(pool_arc) = self.pool.take() {
+                if let Ok(mut pool) = pool_arc.try_lock() {
+                    pool.discard_client();
+                } else {
+                    pool_arc.blocking_lock().discard_client();
+                }
+            }
+        }
+    }
+    let mut guard = LeakGuard {
+        pool: Some(pool_for_guard),
+    };
+
+    // Reset state: DISCARD (cancel MULTI/WATCH) + SELECT <configured_db>
+    let reset_result = tokio::time::timeout(
+        timeout_duration,
+        entry.client.reset_connection_state(configured_db),
+    )
+    .await;
+
+    // Disarm the guard — we handle the outcome explicitly
+    guard.pool = None;
+
+    let mut pool = pool_arc.lock().await;
+    match reset_result {
+        Ok(Ok(_)) => pool.return_to_idle(entry),
+        _ => {
+            logger_core::log_warn(
+                "pool",
+                "Client reset failed on release — discarding connection",
+            );
+            pool.discard_client();
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // GLOBAL REGISTRY
 // ═══════════════════════════════════════════════════════════════════════════════
