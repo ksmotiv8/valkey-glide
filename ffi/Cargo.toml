@@ -5,6 +5,10 @@ edition = "2024"
 license = "Apache-2.0"
 authors = ["Valkey GLIDE Maintainers"]
 
+[features]
+default = ["pool-support"]
+pool-support = []
+
 [lib]
 crate-type = ["staticlib", "rlib", "cdylib"]
 

@@ -1,6 +1,6 @@
 // Copyright Valkey GLIDE Project Contributors - SPDX Identifier: Apache-2.0
 
-package glide
+package integTest
 
 import (
 	"context"
@@ -14,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	glide "github.com/valkey-io/valkey-glide/go/v2"
 	"github.com/valkey-io/valkey-glide/go/v2/config"
 )
 
@@ -53,7 +54,7 @@ func getEnvStandaloneEndpoint() *config.NodeAddress {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 func TestPoolCreateAndMetrics(t *testing.T) {
-	pool, err := NewClientPool(standaloneConfig(), PoolConfig{
+	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
 		MaxSize:        3,
 		MinIdle:        2,
 		AcquireTimeout: 10 * time.Second,
@@ -69,7 +70,7 @@ func TestPoolCreateAndMetrics(t *testing.T) {
 }
 
 func TestPoolAcquireAndCommands(t *testing.T) {
-	pool, err := NewClientPool(standaloneConfig(), PoolConfig{
+	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
 		MaxSize:        3,
 		MinIdle:        1,
 		AcquireTimeout: 10 * time.Second,
@@ -103,7 +104,7 @@ func TestPoolAcquireAndCommands(t *testing.T) {
 }
 
 func TestPoolReuse(t *testing.T) {
-	pool, err := NewClientPool(standaloneConfig(), PoolConfig{
+	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
 		MaxSize:        3,
 		MinIdle:        1,
 		AcquireTimeout: 10 * time.Second,
@@ -126,7 +127,7 @@ func TestPoolReuse(t *testing.T) {
 }
 
 func TestPoolExhaustionTimeout(t *testing.T) {
-	pool, err := NewClientPool(standaloneConfig(), PoolConfig{
+	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
 		MaxSize:        1,
 		MinIdle:        1,
 		AcquireTimeout: 10 * time.Second,
@@ -148,7 +149,7 @@ func TestPoolExhaustionTimeout(t *testing.T) {
 }
 
 func TestPoolConcurrentAccess(t *testing.T) {
-	pool, err := NewClientPool(standaloneConfig(), PoolConfig{
+	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
 		MaxSize:        4,
 		MinIdle:        4,
 		AcquireTimeout: 15 * time.Second,
@@ -202,7 +203,7 @@ func TestPoolConcurrentAccess(t *testing.T) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 func TestScopeAcquirePingRelease(t *testing.T) {
-	client, err := NewClient(standaloneConfig())
+	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -220,7 +221,7 @@ func TestScopeAcquirePingRelease(t *testing.T) {
 }
 
 func TestScopeGetSet(t *testing.T) {
-	client, err := NewClient(standaloneConfig())
+	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -243,7 +244,7 @@ func TestScopeGetSet(t *testing.T) {
 }
 
 func TestScopeReturnsEmptyForMissingKey(t *testing.T) {
-	client, err := NewClient(standaloneConfig())
+	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -258,7 +259,7 @@ func TestScopeReturnsEmptyForMissingKey(t *testing.T) {
 }
 
 func TestScopeWatchMultiExec(t *testing.T) {
-	client, err := NewClient(standaloneConfig())
+	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -294,7 +295,7 @@ func TestScopeWatchMultiExec(t *testing.T) {
 }
 
 func TestScopeRaisesAfterRelease(t *testing.T) {
-	client, err := NewClient(standaloneConfig())
+	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -310,7 +311,7 @@ func TestScopeRaisesAfterRelease(t *testing.T) {
 }
 
 func TestScopeWatchConflictAbortsExec(t *testing.T) {
-	client, err := NewClient(standaloneConfig())
+	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -347,7 +348,7 @@ func TestScopeWatchConflictAbortsExec(t *testing.T) {
 }
 
 func TestScopeOCCConcurrentIncrement(t *testing.T) {
-	client, err := NewClient(standaloneConfig())
+	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -405,7 +406,7 @@ func TestScopeOCCConcurrentIncrement(t *testing.T) {
 }
 
 func TestScopeCloseIsIdempotent(t *testing.T) {
-	client, err := NewClient(standaloneConfig())
+	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -420,7 +421,7 @@ func TestScopeCloseIsIdempotent(t *testing.T) {
 }
 
 func TestScopePoolReuse(t *testing.T) {
-	client, err := NewClient(standaloneConfig())
+	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -443,7 +444,7 @@ func TestScopePoolReuse(t *testing.T) {
 }
 
 func TestPoolCloseRejectsAcquire(t *testing.T) {
-	pool, err := NewClientPool(standaloneConfig(), PoolConfig{
+	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
 		MaxSize:        2,
 		MinIdle:        1,
 		AcquireTimeout: 10 * time.Second,
@@ -476,12 +477,12 @@ func compressedConfig() *config.ClientConfiguration {
 
 func TestScopeCompressionWritesParity(t *testing.T) {
 	// Client with compression
-	compressedClient, err := NewClient(compressedConfig())
+	compressedClient, err := glide.NewClient(compressedConfig())
 	require.NoError(t, err)
 	defer compressedClient.Close()
 
 	// Client without compression (raw)
-	rawClient, err := NewClient(standaloneConfig())
+	rawClient, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer rawClient.Close()
 
@@ -514,7 +515,7 @@ func TestScopeCompressionWritesParity(t *testing.T) {
 }
 
 func TestScopeCompressionReadsParity(t *testing.T) {
-	compressedClient, err := NewClient(compressedConfig())
+	compressedClient, err := glide.NewClient(compressedConfig())
 	require.NoError(t, err)
 	defer compressedClient.Close()
 
@@ -546,7 +547,7 @@ func TestScopeDatabaseInheritance(t *testing.T) {
 		WithRequestTimeout(5000 * time.Millisecond).
 		WithDatabaseId(2)
 
-	client, err := NewClient(cfg)
+	client, err := glide.NewClient(cfg)
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -569,7 +570,7 @@ func TestScopeDatabaseInheritance(t *testing.T) {
 	assert.Equal(t, "on-db2", parentVal.Value())
 
 	// A client on database 0 should NOT see the key
-	db0Client, err := NewClient(standaloneConfig())
+	db0Client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer db0Client.Close()
 	db0Val, err := db0Client.Get(ctx, key)
@@ -580,7 +581,7 @@ func TestScopeDatabaseInheritance(t *testing.T) {
 }
 
 func TestScopeReleaseResetsDatabase(t *testing.T) {
-	client, err := NewClient(standaloneConfig())
+	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -612,7 +613,7 @@ func TestScopeReleaseResetsDatabase(t *testing.T) {
 		WithAddress(&config.NodeAddress{Host: "localhost", Port: 6379}).
 		WithRequestTimeout(5000 * time.Millisecond).
 		WithDatabaseId(4)
-	cleanupClient, _ := NewClient(cleanupCfg)
+	cleanupClient, _ := glide.NewClient(cleanupCfg)
 	if cleanupClient != nil {
 		cleanupClient.Del(ctx, []string{key})
 		cleanupClient.Close()
