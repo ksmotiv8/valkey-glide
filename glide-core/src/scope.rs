@@ -198,6 +198,85 @@ pub async fn execute_scope_command(
     }
 }
 
+/// Full-featured scope command execution with all cross-cutting concerns.
+///
+/// This is the single entry point that all language bindings should use.
+/// It applies (in order):
+/// 1. Circuit breaker check (reject if open)
+/// 2. Inflight request reservation (reject if exhausted)
+/// 3. Compression on write (if parent has compression enabled)
+/// 4. Command execution via `execute_scope_command`
+/// 5. Latency recording on the parent's tracker
+///
+/// The watchdog (timeout diagnostics via `tokio::select!`) is NOT included here
+/// because it requires wrapping the future at the call site. Callers should
+/// wrap `send_scope_command` in a watchdog select if desired.
+///
+/// # Errors
+/// - `CircuitBreakerOpen` if parent's circuit breaker is open
+/// - `ClientError("Reached maximum inflight requests")` if inflight is exhausted
+/// - Any error from `execute_scope_command` (timeout, IO, cross-slot, etc.)
+pub async fn send_scope_command(
+    scope_id: u64,
+    cmd_name: &str,
+    args: &mut Vec<Vec<u8>>,
+    client: Option<&Client>,
+) -> RedisResult<Value> {
+    // 1. Circuit breaker check
+    if let Some(c) = client {
+        if !c.is_circuit_breaker_healthy() {
+            return Err(RedisError::from((
+                redis::ErrorKind::CircuitBreakerOpen,
+                "Client circuit breaker is open - core unhealthy",
+            )));
+        }
+    }
+
+    // 2. Inflight request reservation (reject if exhausted)
+    let _inflight_tracker = if let Some(c) = client {
+        match c.reserve_inflight_request() {
+            Some(t) => Some(t),
+            None => {
+                return Err(RedisError::from((
+                    redis::ErrorKind::ClientError,
+                    "Reached maximum inflight requests",
+                )));
+            }
+        }
+    } else {
+        None
+    };
+
+    // 3. Compression on write
+    if let Some(c) = client {
+        if let Some(cm) = c.compression_manager() {
+            if cm.is_enabled() {
+                let mut full_args = vec![cmd_name.as_bytes().to_vec()];
+                full_args.extend(args.iter().cloned());
+                // Resolve command type for compression routing
+                let effective_type = crate::request_type::RequestType::from_command_name(cmd_name)
+                    .unwrap_or(crate::request_type::RequestType::CustomCommand);
+                let _ = crate::compression::process_command_args_for_compression(
+                    args,
+                    effective_type,
+                    Some(cm.as_ref()),
+                );
+            }
+        }
+    }
+
+    // 4. Execute
+    let cmd_start = std::time::Instant::now();
+    let result = execute_scope_command(scope_id, cmd_name, args, client).await;
+
+    // 5. Record latency
+    if let Some(c) = client {
+        c.latency_tracker().record(cmd_start.elapsed());
+    }
+
+    result
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // BACKGROUND CONNECTION CREATION
 // ═══════════════════════════════════════════════════════════════════════════════

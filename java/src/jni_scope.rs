@@ -70,10 +70,9 @@ pub extern "system" fn Java_glide_ffi_resolvers_GlideScopeResolver_glideScopeExe
     let sid = scope_id as u64;
 
     runtime.spawn(async move {
-        // Get the parent client for timeout/decompression/IAM
+        // Get the parent client for timeout/decompression/IAM/CB/inflight
         let client_registry = glide_core::scope::get_client_registry();
         let client = {
-            // Find parent client_id via the scope pool that owns this scope
             let pools = glide_core::pool::get_client_scope_pools();
             let parent_id = pools
                 .iter()
@@ -88,8 +87,9 @@ pub extern "system" fn Java_glide_ffi_resolvers_GlideScopeResolver_glideScopeExe
             parent_id.and_then(|pid| client_registry.get(&pid).map(|e| e.value().clone()))
         };
 
+        let mut args = args;
         let result =
-            glide_core::scope::execute_scope_command(sid, &cmd_name, &args, client.as_ref()).await;
+            glide_core::scope::send_scope_command(sid, &cmd_name, &mut args, client.as_ref()).await;
 
         complete_callback(jvm, callback_id, result, false);
     });

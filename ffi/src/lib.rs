@@ -5856,66 +5856,8 @@ pub unsafe extern "C" fn glide_scope_execute_async(
             parent_id.and_then(|pid| client_registry.get(&pid).map(|e| e.value().clone()))
         };
 
-        // Apply compression on write
-        if let Some(ref c) = client
-            && let Some(cm) = c.compression_manager()
-            && cm.is_enabled()
-        {
-            let mut full_args = vec![cmd_name.as_bytes().to_vec()];
-            full_args.extend(args.iter().cloned());
-            let effective_type = resolve_custom_command_type(&full_args);
-            let _ = glide_core::compression::process_command_args_for_compression(
-                &mut args,
-                effective_type,
-                Some(cm.as_ref()),
-            );
-        }
-
         // OTel: create span for scope command
         let span_ptr = create_otel_span(RequestType::CustomCommand);
-
-        // Circuit breaker: reject immediately if parent's CB is open
-        if let Some(ref c) = client
-            && !c.is_circuit_breaker_healthy()
-        {
-            if span_ptr != 0 {
-                unsafe { drop_otel_span(span_ptr) };
-            }
-            let msg = "Client circuit breaker is open - core unhealthy";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            unsafe {
-                failure_callback(
-                    request_id,
-                    c_msg.into_raw(),
-                    errors::RequestErrorType::Disconnect,
-                );
-            }
-            return;
-        }
-
-        // Inflight tracking: reserve a slot on the parent client (reject if exhausted)
-        let _inflight_tracker = if let Some(ref c) = client {
-            match c.reserve_inflight_request() {
-                Some(t) => Some(t),
-                None => {
-                    if span_ptr != 0 {
-                        unsafe { drop_otel_span(span_ptr) };
-                    }
-                    let msg = "Reached maximum inflight requests";
-                    let c_msg = CString::new(msg).unwrap_or_default();
-                    unsafe {
-                        failure_callback(
-                            request_id,
-                            c_msg.into_raw(),
-                            errors::RequestErrorType::Unspecified,
-                        );
-                    }
-                    return;
-                }
-            }
-        } else {
-            None
-        };
 
         // Watchdog: register for timeout diagnostics
         let cmd_start = std::time::Instant::now();
@@ -5926,26 +5868,18 @@ pub unsafe extern "C" fn glide_scope_execute_async(
         let timeout_rx = glide_core::timeout_watchdog::TimeoutWatchdog::global()
             .register(timeout_duration, cmd_start);
 
-        // Execute with watchdog race
+        // Execute with watchdog race — send_scope_command handles CB, inflight,
+        // compression, latency recording internally
         let result = {
-            let execute = scope::execute_scope_command(scope_id, &cmd_name, &args, client.as_ref());
+            let execute =
+                scope::send_scope_command(scope_id, &cmd_name, &mut args, client.as_ref());
             tokio::pin!(execute);
             tokio::select! {
-                result = &mut execute => {
-                    // Record latency into per-client tracker
-                    if let Some(ref c) = client {
-                        c.latency_tracker().record(cmd_start.elapsed());
-                    }
-                    result
-                }
+                result = &mut execute => result,
                 recv_result = timeout_rx => {
                     match recv_result {
-                        Err(_) => {
-                            // Watchdog thread died — fall through
-                            execute.await
-                        }
+                        Err(_) => execute.await,
                         Ok(()) => {
-                            // Watchdog fired — build diagnostic event
                             let actual_elapsed = cmd_start.elapsed();
                             let pending = glide_core::timeout_watchdog::pending_count();
                             let p99 = client.as_ref().and_then(|c| c.latency_tracker().p99());
@@ -5975,10 +5909,7 @@ pub unsafe extern "C" fn glide_scope_execute_async(
                                 inflight_at_timeout: None,
                                 retry_count: 0,
                             };
-                            logger_core::log_warn(
-                                "timeout_watchdog",
-                                event.to_string(),
-                            );
+                            logger_core::log_warn("timeout_watchdog", event.to_string());
                             Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into())
                         }
                     }
@@ -6167,74 +6098,12 @@ pub unsafe extern "C" fn glide_scope_execute(
         parent_id.and_then(|pid| client_registry.get(&pid).map(|e| e.value().clone()))
     };
 
-    if let Some(ref client) = parent_client
-        && let Some(cm) = client.compression_manager()
-        && cm.is_enabled()
-    {
-        // Scope commands are equivalent to CustomCommand — the first "arg" is
-        // effectively the command name for compression routing purposes.
-        // Build a combined args list [cmd_name, ...args] for resolve_custom_command_type.
-        let mut full_args = vec![cmd_name.as_bytes().to_vec()];
-        full_args.extend(args.iter().cloned());
-        let effective_type = resolve_custom_command_type(&full_args);
-        let _ = glide_core::compression::process_command_args_for_compression(
-            &mut args,
-            effective_type,
-            Some(cm.as_ref()),
-        );
-    }
-
     let runtime = get_pool_runtime();
 
     // OTel: create span for scope command
     let span_ptr = create_otel_span(RequestType::CustomCommand);
 
-    // Circuit breaker: reject immediately if parent's CB is open
-    if let Some(ref client) = parent_client
-        && !client.is_circuit_breaker_healthy()
-    {
-        if span_ptr != 0 {
-            unsafe { drop_otel_span(span_ptr) };
-        }
-        let msg = "Client circuit breaker is open - core unhealthy";
-        let c_msg = CString::new(msg).unwrap_or_default();
-        let error = Box::into_raw(Box::new(CommandError {
-            command_error_type: errors::RequestErrorType::Disconnect,
-            command_error_message: c_msg.into_raw(),
-        }));
-        return Box::into_raw(Box::new(CommandResult {
-            response: std::ptr::null_mut(),
-            command_error: error,
-            arena: std::ptr::null_mut(),
-        }));
-    }
-
-    // Inflight tracking: reserve a slot on the parent client (reject if exhausted)
-    let _inflight_tracker = if let Some(ref client) = parent_client {
-        match client.reserve_inflight_request() {
-            Some(t) => Some(t),
-            None => {
-                if span_ptr != 0 {
-                    unsafe { drop_otel_span(span_ptr) };
-                }
-                let msg = "Reached maximum inflight requests";
-                let c_msg = CString::new(msg).unwrap_or_default();
-                let error = Box::into_raw(Box::new(CommandError {
-                    command_error_type: errors::RequestErrorType::Unspecified,
-                    command_error_message: c_msg.into_raw(),
-                }));
-                return Box::into_raw(Box::new(CommandResult {
-                    response: std::ptr::null_mut(),
-                    command_error: error,
-                    arena: std::ptr::null_mut(),
-                }));
-            }
-        }
-    } else {
-        None
-    };
-
-    // Watchdog: register for timeout diagnostics (same as normal send path)
+    // Watchdog: register for timeout diagnostics
     let cmd_start = std::time::Instant::now();
     let timeout_duration = parent_client
         .as_ref()
@@ -6243,28 +6112,18 @@ pub unsafe extern "C" fn glide_scope_execute(
     let timeout_rx = glide_core::timeout_watchdog::TimeoutWatchdog::global()
         .register(timeout_duration, cmd_start);
 
-    // Execute with watchdog race — block on the async scope execution
+    // Execute with watchdog race — send_scope_command handles CB, inflight,
+    // compression, latency recording internally
     let result = runtime.block_on(async {
         let execute =
-            scope::execute_scope_command(scope_id, &cmd_name, &args, parent_client.as_ref());
+            scope::send_scope_command(scope_id, &cmd_name, &mut args, parent_client.as_ref());
         tokio::pin!(execute);
         tokio::select! {
-            result = &mut execute => {
-                // Record latency into per-client tracker
-                if let Some(ref c) = parent_client {
-                    c.latency_tracker().record(cmd_start.elapsed());
-                }
-                result
-            }
+            result = &mut execute => result,
             recv_result = timeout_rx => {
                 match recv_result {
-                    Err(_) => {
-                        // Watchdog thread died — fall through to let the command
-                        // complete via the inner tokio::time::timeout
-                        execute.await
-                    }
+                    Err(_) => execute.await,
                     Ok(()) => {
-                        // Watchdog fired — build diagnostic event
                         let actual_elapsed = cmd_start.elapsed();
                         let pending = glide_core::timeout_watchdog::pending_count();
                         let p99 = parent_client.as_ref().and_then(|c| c.latency_tracker().p99());
@@ -6294,10 +6153,7 @@ pub unsafe extern "C" fn glide_scope_execute(
                             inflight_at_timeout: None,
                             retry_count: 0,
                         };
-                        logger_core::log_warn(
-                            "timeout_watchdog",
-                            event.to_string(),
-                        );
+                        logger_core::log_warn("timeout_watchdog", event.to_string());
                         Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into())
                     }
                 }
