@@ -2,6 +2,7 @@
 package glide.scope;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static glide.utils.Java8Utils.repeat;
 
 import glide.TestConfiguration;
 import glide.api.GlideClient;
@@ -11,7 +12,6 @@ import glide.api.models.configuration.GlideClientConfiguration;
 import glide.api.models.configuration.NodeAddress;
 import glide.api.models.scope.IsolatedScope;
 import java.time.Duration;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
@@ -56,7 +56,7 @@ public class ScopeConnectionModifiersTest {
 
         // Generate a value large enough to trigger compression (> 64 bytes)
         String key = "scope-compress-" + UUID.randomUUID();
-        String largeValue = "A".repeat(500); // 500 bytes — well above threshold
+        String largeValue = repeat("A", 500); // 500 bytes — well above threshold
 
         // SET via scoped connection
         try (IsolatedScope scope = client.scopedConnection(Duration.ofSeconds(10))
@@ -108,7 +108,7 @@ public class ScopeConnectionModifiersTest {
         GlideClient client = GlideClient.createClient(config).get(10, TimeUnit.SECONDS);
 
         String key = "scope-read-compressed-" + UUID.randomUUID();
-        String value = "CompressibleData_".repeat(50); // ~850 bytes
+        String value = repeat("CompressibleData_", 50); // ~850 bytes
 
         // Write via normal client (compressed)
         client.set(key, value).get(5, TimeUnit.SECONDS);
@@ -301,7 +301,7 @@ public class ScopeConnectionModifiersTest {
         GlideClient client = GlideClient.createClient(config).get(10, TimeUnit.SECONDS);
 
         String key = "combined-" + UUID.randomUUID();
-        String largeValue = "TestData_".repeat(100); // ~900 bytes, will be compressed
+        String largeValue = repeat("TestData_", 100); // ~900 bytes, will be compressed
 
         // Write via scope
         try (IsolatedScope scope = client.scopedConnection(Duration.ofSeconds(10))
@@ -355,7 +355,7 @@ public class ScopeConnectionModifiersTest {
 
         // Use a large value that will be compressed
         String key = "watch-compress-" + UUID.randomUUID();
-        String initialValue = "InitialLargeValue_".repeat(20); // ~360 bytes
+        String initialValue = repeat("InitialLargeValue_", 20); // ~360 bytes
         client.set(key, initialValue).get(5, TimeUnit.SECONDS);
 
         // OCC loop on the compressed key
@@ -367,7 +367,7 @@ public class ScopeConnectionModifiersTest {
                     "WATCH should read the decompressed value correctly");
 
             // Build a new large value
-            String newValue = "UpdatedLargeValue_".repeat(20);
+            String newValue = repeat("UpdatedLargeValue_", 20);
             scope.multi().get(5, TimeUnit.SECONDS);
             scope.set(key, newValue).get(5, TimeUnit.SECONDS);
             String execResult = scope.exec().get(5, TimeUnit.SECONDS);
