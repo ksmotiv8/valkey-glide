@@ -26,7 +26,7 @@ use redis::{
 pub use standalone_client::StandaloneClient;
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -325,6 +325,9 @@ pub struct Client {
     latency_tracker: Arc<crate::timeout_watchdog::LatencyTracker>,
     // Optional Client-wide circuit breaker
     circuit_breaker: Option<Arc<circuit_breaker::ClientCircuitBreaker>>,
+    // Tracks the current database selected at runtime (updated on SELECT commands).
+    // Used by scope connections to inherit the parent's current database.
+    current_database: Arc<AtomicU32>,
 }
 
 async fn run_with_timeout<T>(
@@ -525,6 +528,9 @@ impl Client {
         self.update_stored_database_id(database_id).await?;
         // Keep OTel db.namespace in sync
         self.otel_metadata.db_namespace = database_id.to_string();
+        // Keep current_database in sync (used by scope connections to inherit parent state)
+        self.current_database
+            .store(database_id as u32, Ordering::Release);
         Ok(())
     }
 
@@ -2509,6 +2515,7 @@ impl Client {
                 otel_metadata,
                 client_side_cache,
                 latency_tracker: Arc::new(crate::timeout_watchdog::LatencyTracker::new(4096)),
+                current_database: Arc::new(AtomicU32::new(request.database_id as u32)),
                 circuit_breaker: request.client_circuit_breaker.as_ref().map(|config| {
                     let defaults = circuit_breaker::ClientCircuitBreakerConfig::default();
                     Arc::new(circuit_breaker::ClientCircuitBreaker::new(
@@ -2631,6 +2638,13 @@ impl Client {
     /// Returns the configured request timeout for this client.
     pub fn get_request_timeout(&self) -> Duration {
         self.request_timeout
+    }
+
+    /// Returns the current database the client is operating on.
+    /// Updated whenever SELECT is called. Scope connections use this to inherit
+    /// the parent's current database at acquire time.
+    pub fn current_database(&self) -> u32 {
+        self.current_database.load(Ordering::Acquire)
     }
 
     /// Returns a reference to the per-client latency tracker (for watchdog diagnostics).
@@ -2759,6 +2773,7 @@ impl Client {
             client_side_cache: None,
             latency_tracker: Arc::new(crate::timeout_watchdog::LatencyTracker::new(64)),
             circuit_breaker: None,
+            current_database: Arc::new(AtomicU32::new(0)),
         }
     }
 }
@@ -3059,6 +3074,7 @@ mod tests {
             client_side_cache: None,
             latency_tracker: Arc::new(crate::timeout_watchdog::LatencyTracker::new(64)),
             circuit_breaker: None,
+            current_database: Arc::new(AtomicU32::new(0)),
         }
     }
 

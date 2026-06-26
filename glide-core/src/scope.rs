@@ -299,8 +299,12 @@ pub async fn create_scope_connection(
         }
     }
 
-    // SELECT: switch to configured database if non-zero
-    let database_id = proto.database_id;
+    // SELECT: use the parent client's current database (runtime state) if available,
+    // otherwise fall back to the static config. This ensures scoped connections
+    // inherit the parent's current database even after runtime SELECT calls.
+    let database_id = client
+        .map(|c| c.current_database())
+        .unwrap_or(proto.database_id);
     if database_id != 0 {
         init_pipe.cmd("SELECT").arg(database_id.to_string());
         init_count += 1;

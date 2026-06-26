@@ -419,10 +419,10 @@ class TestDatabaseStateInheritance:
             client.close()
 
     def test_scope_uses_config_db_not_runtime_db(self):
-        """If parent calls SELECT at runtime, scope still uses the config database.
+        """If parent calls SELECT at runtime, scope inherits the runtime database.
 
-        Scoped connections are created from the static connection request config,
-        not from the parent's current runtime state. This is deterministic behavior.
+        Scoped connections use the parent client's current_database() at creation
+        time, which reflects any runtime SELECT calls made on the parent.
         """
         # Create client configured for database 0
         config = GlideClientConfiguration(
@@ -434,20 +434,18 @@ class TestDatabaseStateInheritance:
 
         key = f"runtime-db-{uuid.uuid4().hex[:8]}"
         try:
-            # Write a key on db 3 via the parent client (runtime SELECT)
+            # Switch parent to db 3 at runtime
             client.custom_command(["SELECT", "3"])
             client.set(key, "on-db3")
 
-            # Scope uses config database (0), so it should NOT see the key
+            # Scope should inherit the parent's current database (3)
             with client.scoped_connection() as scope:
                 result = scope.get(key)
-                # Scope is on db 0 (from config), key is on db 3
-                assert result is None, (
-                    "Scope should use configured database (0), not parent's runtime db (3)"
+                assert result == "on-db3", (
+                    "Scope should inherit parent's current runtime database (3)"
                 )
 
-            # Clean up: switch parent back and delete
-            client.custom_command(["SELECT", "3"])
+            # Clean up: delete key on db 3 and switch parent back
             client.custom_command(["DEL", key])
             client.custom_command(["SELECT", "0"])
         finally:
