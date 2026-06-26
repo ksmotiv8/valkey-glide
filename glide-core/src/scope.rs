@@ -270,7 +270,7 @@ pub async fn create_scope_connection(
         pubsub_synchronizer: None,
         iam_token_provider: None,
     };
-    let conn = match tokio::time::timeout(
+    let mut conn = match tokio::time::timeout(
         std::time::Duration::from_secs(5),
         redis_client.get_multiplexed_async_connection(opts),
     )
@@ -279,6 +279,55 @@ pub async fn create_scope_connection(
         Ok(Ok(c)) => c,
         _ => return,
     };
+
+    // Post-connect initialization: AUTH + SELECT to match parent client config.
+    // Build a pipeline of init commands (batched, single round-trip).
+    let mut init_pipe = redis::Pipeline::new();
+    let mut init_count = 0;
+
+    // AUTH: send credentials if configured
+    if let Some(ref auth_info) = proto.authentication_info.0 {
+        let password = &auth_info.password;
+        let username = &auth_info.username;
+        if !password.is_empty() {
+            if !username.is_empty() {
+                init_pipe.cmd("AUTH").arg(&**username).arg(&**password);
+            } else {
+                init_pipe.cmd("AUTH").arg(&**password);
+            }
+            init_count += 1;
+        }
+    }
+
+    // SELECT: switch to configured database if non-zero
+    let database_id = proto.database_id;
+    if database_id != 0 {
+        init_pipe.cmd("SELECT").arg(database_id.to_string());
+        init_count += 1;
+    }
+
+    // CLIENT SETNAME: set client name if configured
+    let client_name = &proto.client_name;
+    if !client_name.is_empty() {
+        init_pipe
+            .cmd("CLIENT")
+            .arg("SETNAME")
+            .arg(client_name.as_bytes());
+        init_count += 1;
+    }
+
+    // Execute init pipeline if any commands are needed
+    if init_count > 0 {
+        let init_result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            conn.send_packed_commands(&init_pipe, 0, init_count),
+        )
+        .await;
+        if !matches!(init_result, Ok(Ok(_))) {
+            // Init failed — discard this connection
+            return;
+        }
+    }
 
     let mut pool_guard = pool.lock().await;
     if pool_guard.state.load(Ordering::Acquire) != POOL_RUNNING {
@@ -292,7 +341,7 @@ pub async fn create_scope_connection(
         created_at: Instant::now(),
         last_idle_at: Instant::now(),
         borrowed_at: None,
-        state: ConnectionState::default(),
+        state: ConnectionState::with_configured_db(database_id as u8),
         pinned_slot: None,
     };
     pool_guard.idle.push_back(entry);

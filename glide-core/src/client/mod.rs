@@ -2628,6 +2628,40 @@ impl Client {
         self.compression_manager.clone()
     }
 
+    /// Returns the configured request timeout for this client.
+    pub fn get_request_timeout(&self) -> Duration {
+        self.request_timeout
+    }
+
+    /// Returns a reference to the per-client latency tracker (for watchdog diagnostics).
+    pub fn latency_tracker(&self) -> &Arc<crate::timeout_watchdog::LatencyTracker> {
+        &self.latency_tracker
+    }
+
+    /// Reset connection state to a clean baseline after a pool borrow is returned.
+    ///
+    /// Sends a batched pipeline (single round-trip) that selectively issues:
+    /// - DISCARD — cancels any pending MULTI and implicitly UNWATCHes
+    /// - SELECT <configured_db> — resets to the pool's configured database
+    ///
+    /// DISCARD is always safe to send (returns ERR if no MULTI active — we ignore it).
+    /// SELECT is always sent to guarantee the connection is on the correct database.
+    ///
+    /// This ensures the next borrower gets a connection in a known-good state.
+    pub async fn reset_connection_state(&mut self, configured_db: u32) -> RedisResult<()> {
+        // Send DISCARD — ignore ERR if no MULTI is active
+        let _ = self.send_command(&mut redis::cmd("DISCARD"), None).await;
+
+        // Send SELECT — this must succeed
+        self.send_command(
+            &mut redis::cmd("SELECT").arg(configured_db.to_string()),
+            None,
+        )
+        .await?;
+
+        Ok(())
+    }
+
     /// Check if compression is enabled for this client
     ///
     /// # Returns

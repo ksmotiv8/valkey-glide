@@ -5404,6 +5404,18 @@ pub unsafe extern "C" fn glide_pool_create(
 
     let is_async = !matches!(ct, ClientType::SyncClient);
 
+    // Parse database_id from connection request for state reset on release
+    let configured_database_id = {
+        use protobuf::Message as _;
+        connection_request::ConnectionRequest::parse_from_bytes(&connection_request)
+            .ok()
+            .and_then(|req| {
+                let db = req.database_id;
+                if db != 0 { Some(db as u32) } else { None }
+            })
+            .unwrap_or(0)
+    };
+
     let config = PoolConfig {
         max_size,
         min_idle,
@@ -5412,6 +5424,7 @@ pub unsafe extern "C" fn glide_pool_create(
         test_on_borrow: false,
         connection_request: connection_request.clone(),
         is_async,
+        configured_database_id,
     };
 
     let pool = match ClientPool::new(config) {
@@ -5681,22 +5694,75 @@ pub extern "C" fn glide_pool_release(pool_id: u64, client_id: u64) -> i32 {
         None => return -1,
     };
 
-    match pool_arc.try_lock() {
+    // Take the client out of in_use (non-blocking fast path)
+    let (entry, configured_db) = match pool_arc.try_lock() {
         Ok(mut pool) => {
-            pool.release(client_id);
-            0
+            let configured_db = pool.config.configured_database_id;
+            match pool.take_for_release(client_id) {
+                Some(e) => (e, configured_db),
+                None => return -1,
+            }
         }
         Err(_) => {
-            // Lock contended — async release
+            // Lock contended — do everything async
             let pool_clone = pool_arc.clone();
             let rt = get_pool_runtime();
             rt.spawn(async move {
                 let mut pool = pool_clone.lock().await;
-                pool.release(client_id);
+                let configured_db = pool.config.configured_database_id;
+                if let Some(mut entry) = pool.take_for_release(client_id) {
+                    // Reset state: DISCARD + SELECT (batched, single round-trip)
+                    let reset_result = tokio::time::timeout(
+                        pool.config.request_timeout * 2,
+                        entry.client.reset_connection_state(configured_db),
+                    )
+                    .await;
+                    match reset_result {
+                        Ok(Ok(_)) => pool.return_to_idle(entry),
+                        _ => {
+                            logger_core::log_warn(
+                                "pool",
+                                "Client reset failed on release — discarding connection",
+                            );
+                            pool.discard_client();
+                        }
+                    }
+                }
             });
-            0
+            return 0;
         }
-    }
+    };
+
+    // Got the entry synchronously — spawn async state reset then return to idle
+    let pool_clone = pool_arc.clone();
+    let rt = get_pool_runtime();
+    rt.spawn(async move {
+        let mut entry = entry;
+        // Reset state: DISCARD (cancel any MULTI/WATCH) + SELECT <configured_db>
+        let timeout_duration = {
+            let pool = pool_clone.lock().await;
+            pool.config.request_timeout * 2
+        };
+        let reset_result = tokio::time::timeout(
+            timeout_duration,
+            entry.client.reset_connection_state(configured_db),
+        )
+        .await;
+
+        let mut pool = pool_clone.lock().await;
+        match reset_result {
+            Ok(Ok(_)) => pool.return_to_idle(entry),
+            _ => {
+                logger_core::log_warn(
+                    "pool",
+                    "Client reset failed on release — discarding connection",
+                );
+                pool.discard_client();
+            }
+        }
+    });
+
+    0
 }
 
 /// Destroy a pool.
@@ -5871,8 +5937,85 @@ pub unsafe extern "C" fn glide_scope_execute_async(
             }
         }
 
-        let result =
-            scope::execute_scope_command(scope_id, &cmd_name, &args, client.as_ref()).await;
+        // OTel: create span for scope command
+        let span_ptr = create_otel_span(RequestType::CustomCommand);
+
+        // Inflight tracking: reserve a slot on the parent client
+        let _inflight_tracker = client.as_ref().and_then(|c| c.reserve_inflight_request());
+
+        // Watchdog: register for timeout diagnostics
+        let cmd_start = std::time::Instant::now();
+        let timeout_duration = client
+            .as_ref()
+            .map(|c| c.get_request_timeout())
+            .unwrap_or(std::time::Duration::from_millis(250));
+        let timeout_rx = glide_core::timeout_watchdog::TimeoutWatchdog::global()
+            .register(timeout_duration, cmd_start);
+
+        // Execute with watchdog race
+        let result = {
+            let execute = scope::execute_scope_command(scope_id, &cmd_name, &args, client.as_ref());
+            tokio::pin!(execute);
+            tokio::select! {
+                result = &mut execute => {
+                    // Record latency into per-client tracker
+                    if let Some(ref c) = client {
+                        c.latency_tracker().record(cmd_start.elapsed());
+                    }
+                    result
+                }
+                recv_result = timeout_rx => {
+                    match recv_result {
+                        Err(_) => {
+                            // Watchdog thread died — fall through
+                            execute.await
+                        }
+                        Ok(()) => {
+                            // Watchdog fired — build diagnostic event
+                            let actual_elapsed = cmd_start.elapsed();
+                            let pending = glide_core::timeout_watchdog::pending_count();
+                            let p99 = client.as_ref().and_then(|c| c.latency_tracker().p99());
+                            let cause = if pending > 100 {
+                                glide_core::timeout_watchdog::TimeoutCause::SystemOverload {
+                                    pending_total: pending,
+                                }
+                            } else {
+                                glide_core::timeout_watchdog::TimeoutCause::ServerUnresponsive {
+                                    node: "scope".to_owned(),
+                                }
+                            };
+                            let event = glide_core::timeout_watchdog::TimeoutEvent {
+                                cause,
+                                command: glide_core::timeout_watchdog::cmd_name_from_bytes(
+                                    cmd_name.as_bytes(),
+                                ),
+                                node: "scope".to_owned(),
+                                phase: glide_core::timeout_watchdog::CommandPhase::Sent,
+                                configured_timeout: timeout_duration,
+                                actual_elapsed,
+                                pending_commands: pending,
+                                recent_p99_latency: p99,
+                                rss_bytes: glide_core::timeout_watchdog::get_rss(),
+                                suggested_timeout: p99.map(|p| (p * 3).max(timeout_duration)),
+                                inflight_at_register: None,
+                                inflight_at_timeout: None,
+                                retry_count: 0,
+                            };
+                            logger_core::log_warn(
+                                "timeout_watchdog",
+                                event.to_string(),
+                            );
+                            Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into())
+                        }
+                    }
+                }
+            }
+        };
+
+        // OTel: end span
+        if span_ptr != 0 {
+            unsafe { drop_otel_span(span_ptr) };
+        }
 
         match result {
             Ok(value) => {
@@ -6078,9 +6221,75 @@ pub unsafe extern "C" fn glide_scope_execute(
         .as_ref()
         .and_then(|c| c.reserve_inflight_request());
 
-    // Execute synchronously — block on the async scope execution
+    // Watchdog: register for timeout diagnostics (same as normal send path)
+    let cmd_start = std::time::Instant::now();
+    let timeout_duration = parent_client
+        .as_ref()
+        .map(|c| c.get_request_timeout())
+        .unwrap_or(std::time::Duration::from_millis(250));
+    let timeout_rx = glide_core::timeout_watchdog::TimeoutWatchdog::global()
+        .register(timeout_duration, cmd_start);
+
+    // Execute with watchdog race — block on the async scope execution
     let result = runtime.block_on(async {
-        scope::execute_scope_command(scope_id, &cmd_name, &args, parent_client.as_ref()).await
+        let execute =
+            scope::execute_scope_command(scope_id, &cmd_name, &args, parent_client.as_ref());
+        tokio::pin!(execute);
+        tokio::select! {
+            result = &mut execute => {
+                // Record latency into per-client tracker
+                if let Some(ref c) = parent_client {
+                    c.latency_tracker().record(cmd_start.elapsed());
+                }
+                result
+            }
+            recv_result = timeout_rx => {
+                match recv_result {
+                    Err(_) => {
+                        // Watchdog thread died — fall through to let the command
+                        // complete via the inner tokio::time::timeout
+                        execute.await
+                    }
+                    Ok(()) => {
+                        // Watchdog fired — build diagnostic event
+                        let actual_elapsed = cmd_start.elapsed();
+                        let pending = glide_core::timeout_watchdog::pending_count();
+                        let p99 = parent_client.as_ref().and_then(|c| c.latency_tracker().p99());
+                        let cause = if pending > 100 {
+                            glide_core::timeout_watchdog::TimeoutCause::SystemOverload {
+                                pending_total: pending,
+                            }
+                        } else {
+                            glide_core::timeout_watchdog::TimeoutCause::ServerUnresponsive {
+                                node: "scope".to_owned(),
+                            }
+                        };
+                        let event = glide_core::timeout_watchdog::TimeoutEvent {
+                            cause,
+                            command: glide_core::timeout_watchdog::cmd_name_from_bytes(
+                                cmd_name.as_bytes(),
+                            ),
+                            node: "scope".to_owned(),
+                            phase: glide_core::timeout_watchdog::CommandPhase::Sent,
+                            configured_timeout: timeout_duration,
+                            actual_elapsed,
+                            pending_commands: pending,
+                            recent_p99_latency: p99,
+                            rss_bytes: glide_core::timeout_watchdog::get_rss(),
+                            suggested_timeout: p99.map(|p| (p * 3).max(timeout_duration)),
+                            inflight_at_register: None,
+                            inflight_at_timeout: None,
+                            retry_count: 0,
+                        };
+                        logger_core::log_warn(
+                            "timeout_watchdog",
+                            event.to_string(),
+                        );
+                        Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into())
+                    }
+                }
+            }
+        }
     });
 
     // OTel: end span

@@ -37,6 +37,14 @@ pub extern "system" fn Java_glide_ffi_resolvers_GlidePoolResolver_glidePoolCreat
         request_timeout: Duration::from_millis(request_timeout_ms as u64),
         test_on_borrow: false,
         connection_request: bytes.clone(),
+        is_async: true,
+        configured_database_id: {
+            use protobuf::Message as _;
+            glide_core::connection_request::ConnectionRequest::parse_from_bytes(&bytes)
+                .ok()
+                .map(|req| req.database_id as u32)
+                .unwrap_or(0)
+        },
     };
 
     let pool = match ClientPool::new(config) {
@@ -136,22 +144,62 @@ pub extern "system" fn Java_glide_ffi_resolvers_GlidePoolResolver_glidePoolRelea
         None => return -1,
     };
 
+    let cid = client_id as u64;
     let pool_clone = pool_arc.clone();
-    match pool_arc.try_lock() {
+
+    // Take the client out of in_use (non-blocking fast path)
+    let (entry, configured_db) = match pool_arc.try_lock() {
         Ok(mut pool) => {
-            pool.release(client_id as u64);
-            0
+            let configured_db = pool.config.configured_database_id;
+            match pool.take_for_release(cid) {
+                Some(e) => (e, configured_db),
+                None => return -1,
+            }
         }
         Err(_) => {
+            // Lock contended — do everything async
             let runtime = get_runtime();
-            let cid = client_id as u64;
             runtime.spawn(async move {
                 let mut pool = pool_clone.lock().await;
-                pool.release(cid);
+                let configured_db = pool.config.configured_database_id;
+                if let Some(mut entry) = pool.take_for_release(cid) {
+                    let reset_result = tokio::time::timeout(
+                        pool.config.request_timeout * 2,
+                        entry.client.reset_connection_state(configured_db),
+                    )
+                    .await;
+                    match reset_result {
+                        Ok(Ok(_)) => pool.return_to_idle(entry),
+                        _ => pool.discard_client(),
+                    }
+                }
             });
-            0
+            return 0;
         }
-    }
+    };
+
+    // Got the entry synchronously — spawn async state reset
+    let runtime = get_runtime();
+    runtime.spawn(async move {
+        let mut entry = entry;
+        let timeout_duration = {
+            let pool = pool_clone.lock().await;
+            pool.config.request_timeout * 2
+        };
+        let reset_result = tokio::time::timeout(
+            timeout_duration,
+            entry.client.reset_connection_state(configured_db),
+        )
+        .await;
+
+        let mut pool = pool_clone.lock().await;
+        match reset_result {
+            Ok(Ok(_)) => pool.return_to_idle(entry),
+            _ => pool.discard_client(),
+        }
+    });
+
+    0
 }
 
 /// Destroy a pool.

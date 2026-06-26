@@ -71,6 +71,9 @@ pub struct PoolConfig {
     /// The actual ClientType (with callbacks) is passed at pool creation time
     /// and stored separately in the pool registry for background creation.
     pub is_async: bool,
+    /// The database_id from the connection config (for reset on release).
+    /// Defaults to 0 if not specified in the connection request.
+    pub configured_database_id: u32,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -214,16 +217,25 @@ impl ClientPool {
     }
 
     /// Release a client back to the idle pool by client_id.
-    /// Returns false if not found in in_use.
-    pub fn release(&mut self, client_id: u64) -> bool {
+    ///
+    /// Removes the client from `in_use` and returns it as `Some(entry)` for the
+    /// caller to perform async state reset before returning to idle.
+    /// Returns `None` if client_id was not found in `in_use`.
+    ///
+    /// The caller is responsible for:
+    /// 1. Calling `client.reset_connection_state(configured_db)` on the entry
+    /// 2. Calling `return_to_idle(entry)` to put it back in the idle pool
+    /// Or on failure, calling `discard_client()` to decrement the total count.
+    pub fn take_for_release(&mut self, client_id: u64) -> Option<PooledClient> {
         let entry = self.in_use.remove(&client_id);
-        let Some((_, mut entry)) = entry else {
-            return false;
-        };
+        entry.map(|(_, e)| e)
+    }
 
+    /// Return a client to the idle pool after successful state reset.
+    pub fn return_to_idle(&mut self, mut entry: PooledClient) {
         if self.state.load(Ordering::Acquire) != POOL_RUNNING {
             self.total_count.fetch_sub(1, Ordering::AcqRel);
-            return true;
+            return;
         }
         entry.state = ClientState::Idle;
         entry.last_idle_at = Instant::now();
@@ -233,8 +245,14 @@ impl ClientPool {
         // Notify any threads waiting in blocking acquire
         let (_, condvar) = &*self.release_notify;
         condvar.notify_one();
+    }
 
-        true
+    /// Discard a client (after failed state reset). Decrements total count.
+    pub fn discard_client(&mut self) {
+        self.total_count.fetch_sub(1, Ordering::AcqRel);
+        // Notify waiters since capacity freed up for a new connection
+        let (_, condvar) = &*self.release_notify;
+        condvar.notify_one();
     }
 
     /// Destroy the pool — drop all clients.
@@ -348,13 +366,28 @@ pub struct ConnectionState {
 }
 
 impl ConnectionState {
-    pub fn is_clean(&self) -> bool {
+    /// Create a new state with the given configured database as the "clean" baseline.
+    pub fn with_configured_db(db: u8) -> Self {
+        Self {
+            db_selected: db,
+            ..Default::default()
+        }
+    }
+
+    /// Check if state is clean (no mutations from the initial configured state).
+    /// `configured_db` is the database the connection was initialized with.
+    pub fn is_clean_for(&self, configured_db: u8) -> bool {
         !self.watch_active
             && !self.multi_active
             && !self.tracking_enabled
-            && self.db_selected == 0
+            && self.db_selected == configured_db
             && !self.client_name_changed
             && self.subscriptions.is_empty()
+    }
+
+    /// Legacy check — clean means no state mutations at all (db must be 0).
+    pub fn is_clean(&self) -> bool {
+        self.is_clean_for(0)
     }
 
     pub fn has_subscriptions(&self) -> bool {
@@ -465,6 +498,8 @@ pub struct ScopePool {
     pub connection_request_bytes: Vec<u8>,
     /// The parent client_id that owns this scope pool (for accessing client config).
     pub parent_client_id: u64,
+    /// The database_id from the connection config (for reset on release).
+    pub configured_database_id: u32,
 }
 
 impl ScopePool {
@@ -473,6 +508,20 @@ impl ScopePool {
         connection_request_bytes: Vec<u8>,
         parent_client_id: u64,
     ) -> Self {
+        // Parse configured_database_id from the connection request
+        #[cfg(feature = "proto")]
+        let configured_database_id = {
+            use protobuf::Message as _;
+            crate::connection_request::ConnectionRequest::parse_from_bytes(
+                &connection_request_bytes,
+            )
+            .ok()
+            .map(|req| req.database_id as u32)
+            .unwrap_or(0)
+        };
+        #[cfg(not(feature = "proto"))]
+        let configured_database_id = 0u32;
+
         Self {
             config,
             idle: VecDeque::new(),
@@ -482,6 +531,7 @@ impl ScopePool {
             state: AtomicU8::new(POOL_RUNNING),
             connection_request_bytes,
             parent_client_id,
+            configured_database_id,
         }
     }
 
@@ -555,7 +605,7 @@ impl ScopePool {
 
         match entry.connection.try_lock() {
             Ok(conn) => {
-                if conn.state.is_clean() {
+                if conn.state.is_clean_for(self.configured_database_id as u8) {
                     let idle_conn = ScopedConnection {
                         scope_id: conn.scope_id,
                         connection: conn.connection.clone(),
@@ -572,6 +622,7 @@ impl ScopePool {
                     // If any command fails or the pipeline times out, discard the connection.
                     let conn_arc = entry.connection.clone();
                     let request_timeout = self.config.request_timeout;
+                    let self_configured_db = self.configured_database_id;
 
                     let client_id = self.parent_client_id;
                     let pools = get_client_scope_pools();
@@ -641,9 +692,9 @@ impl ScopePool {
                             cmd_count += 1;
                         }
 
-                        // SELECT 0 (reset database)
-                        if guard.state.db_selected != 0 {
-                            pipe.cmd("SELECT").arg("0");
+                        // SELECT <configured_db> (reset database)
+                        if guard.state.db_selected != self_configured_db as u8 {
+                            pipe.cmd("SELECT").arg(self_configured_db.to_string());
                             cmd_count += 1;
                         }
 
@@ -751,9 +802,8 @@ pub fn get_or_create_scope_pool(
         return existing.value().clone();
     }
 
-    // Slow path: create pool and pre-warm
+    // Slow path: create pool
     let config = ScopePoolConfig::default();
-    let min_idle = config.min_idle;
     let pool = Arc::new(TokioMutex::new(ScopePool::new(
         config,
         connection_request_bytes.clone(),
