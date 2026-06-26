@@ -1327,8 +1327,8 @@ impl Client {
     /// logic as `send_command`, but routes the command to the given
     /// `MultiplexedConnection` instead of the client's internal managed connection.
     ///
-    /// Note: OTel spans and inflight tracking are not applied here because scoped
-    /// connections operate outside the multiplexer's pipeline. OTel support for
+    /// Applies timeout, decompression, and IAM token refresh. Compression on write
+    /// is handled by the caller (FFI layer) before building the Cmd.
     /// scopes is tracked as a follow-up enhancement.
     pub async fn send_command_on_connection(
         &self,
@@ -1348,35 +1348,20 @@ impl Client {
         }
 
         // Compression on write: compress command args if compression is enabled
-        let cmd_to_send = if let Some(ref compression_manager) = self.compression_manager {
-            if compression_manager.is_enabled() {
-                // Clone the command and apply compression to its args
-                // Note: for scope commands, args are already serialized — this handles
-                // cases where values passed to SET/LPUSH/etc. should be compressed.
-                // The scope wire format passes raw args, so compression applies here.
-                cmd.clone() // TODO: apply arg compression when scope command args support it
-            } else {
-                cmd.clone()
-            }
-        } else {
-            cmd.clone()
-        };
 
         let request_timeout = Some(self.request_timeout);
 
         // Send with timeout
         let raw_value = match request_timeout {
             Some(duration) => {
-                match tokio::time::timeout(duration, connection.send_packed_command(&cmd_to_send))
-                    .await
-                {
+                match tokio::time::timeout(duration, connection.send_packed_command(cmd)).await {
                     Ok(result) => result?,
                     Err(_) => {
                         return Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into());
                     }
                 }
             }
-            None => connection.send_packed_command(&cmd_to_send).await?,
+            None => connection.send_packed_command(cmd).await?,
         };
 
         // Apply decompression if compression is enabled

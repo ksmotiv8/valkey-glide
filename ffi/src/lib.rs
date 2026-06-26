@@ -5824,7 +5824,7 @@ pub unsafe extern "C" fn glide_scope_execute_async(
 
     let bytes = unsafe { std::slice::from_raw_parts(command_ptr, command_len) }.to_vec();
 
-    let (cmd_name, args) = match scope::deserialize_command(&bytes) {
+    let (cmd_name, mut args) = match scope::deserialize_command(&bytes) {
         Some(p) => p,
         None => return -2,
     };
@@ -5854,6 +5854,22 @@ pub unsafe extern "C" fn glide_scope_execute_async(
 
             parent_id.and_then(|pid| client_registry.get(&pid).map(|e| e.value().clone()))
         };
+
+        // Apply compression on write
+        if let Some(ref c) = client {
+            if let Some(cm) = c.compression_manager() {
+                if cm.is_enabled() {
+                    let mut full_args = vec![cmd_name.as_bytes().to_vec()];
+                    full_args.extend(args.iter().cloned());
+                    let effective_type = resolve_custom_command_type(&full_args);
+                    let _ = glide_core::compression::process_command_args_for_compression(
+                        &mut args,
+                        effective_type,
+                        Some(cm.as_ref()),
+                    );
+                }
+            }
+        }
 
         let result =
             scope::execute_scope_command(scope_id, &cmd_name, &args, client.as_ref()).await;
@@ -6007,7 +6023,7 @@ pub unsafe extern "C" fn glide_scope_execute(
 
     let bytes = unsafe { std::slice::from_raw_parts(command_ptr, command_len) };
 
-    let (cmd_name, args) = match scope::deserialize_command(bytes) {
+    let (cmd_name, mut args) = match scope::deserialize_command(bytes) {
         Some(p) => p,
         None => return std::ptr::null_mut(),
     };
@@ -6018,29 +6034,59 @@ pub unsafe extern "C" fn glide_scope_execute(
         return std::ptr::null_mut();
     }
 
+    // Apply compression on write if the parent client has compression enabled
+    let client_registry = scope::get_client_registry();
+    let parent_client = {
+        let pools = glide_core::pool::get_client_scope_pools();
+        let parent_id = pools
+            .iter()
+            .find(|e| {
+                e.value()
+                    .try_lock()
+                    .map(|p| p.in_use.contains_key(&scope_id))
+                    .unwrap_or(false)
+            })
+            .map(|e| *e.key());
+        parent_id.and_then(|pid| client_registry.get(&pid).map(|e| e.value().clone()))
+    };
+
+    if let Some(ref client) = parent_client {
+        if let Some(cm) = client.compression_manager() {
+            if cm.is_enabled() {
+                // Scope commands are equivalent to CustomCommand — the first "arg" is
+                // effectively the command name for compression routing purposes.
+                // Build a combined args list [cmd_name, ...args] for resolve_custom_command_type.
+                let mut full_args = vec![cmd_name.as_bytes().to_vec()];
+                full_args.extend(args.iter().cloned());
+                let effective_type = resolve_custom_command_type(&full_args);
+                let _ = glide_core::compression::process_command_args_for_compression(
+                    &mut args,
+                    effective_type,
+                    Some(cm.as_ref()),
+                );
+            }
+        }
+    }
+
     let runtime = get_pool_runtime();
+
+    // OTel: create span for scope command
+    let span_ptr = create_otel_span(RequestType::CustomCommand);
+
+    // Inflight tracking: reserve a slot on the parent client
+    let _inflight_tracker = parent_client
+        .as_ref()
+        .and_then(|c| c.reserve_inflight_request());
 
     // Execute synchronously — block on the async scope execution
     let result = runtime.block_on(async {
-        // Get the parent client for timeout/decompression/IAM
-        let client_registry = scope::get_client_registry();
-        let client = {
-            let pools = glide_core::pool::get_client_scope_pools();
-            let parent_id = pools
-                .iter()
-                .find(|e| {
-                    e.value()
-                        .try_lock()
-                        .map(|p| p.in_use.contains_key(&scope_id))
-                        .unwrap_or(false)
-                })
-                .map(|e| *e.key());
-
-            parent_id.and_then(|pid| client_registry.get(&pid).map(|e| e.value().clone()))
-        };
-
-        scope::execute_scope_command(scope_id, &cmd_name, &args, client.as_ref()).await
+        scope::execute_scope_command(scope_id, &cmd_name, &args, parent_client.as_ref()).await
     });
+
+    // OTel: end span
+    if span_ptr != 0 {
+        unsafe { drop_otel_span(span_ptr) };
+    }
 
     // Convert result to CommandResult
     // Fast path for simple responses (OK, Nil) — avoid arena allocation
