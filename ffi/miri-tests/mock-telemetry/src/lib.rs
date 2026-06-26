@@ -102,6 +102,26 @@ impl GlideOpenTelemetry {
     pub unsafe fn span_from_pointer(_ptr: u64) -> Result<GlideSpan, TraceError> {
         Ok(GlideSpan)
     }
+
+    pub fn record_pool_hit() -> Result<(), GlideOTELError> {
+        Ok(())
+    }
+
+    pub fn record_pool_miss() -> Result<(), GlideOTELError> {
+        Ok(())
+    }
+
+    pub fn record_scope_acquire() -> Result<(), GlideOTELError> {
+        Ok(())
+    }
+
+    pub fn record_scope_release() -> Result<(), GlideOTELError> {
+        Ok(())
+    }
+
+    pub fn record_timeout_error() -> Result<(), GlideOTELError> {
+        Ok(())
+    }
 }
 
 pub struct GlideOTELError;

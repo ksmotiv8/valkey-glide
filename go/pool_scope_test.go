@@ -5,6 +5,9 @@ package glide
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,9 +18,34 @@ import (
 )
 
 func standaloneConfig() *config.ClientConfiguration {
+	host := "localhost"
+	port := 6379
+	// CI provides standalone endpoint via env var
+	if ep := getEnvStandaloneEndpoint(); ep != nil {
+		host = ep.Host
+		port = ep.Port
+	}
 	return config.NewClientConfiguration().
-		WithAddress(&config.NodeAddress{Host: "localhost", Port: 6379}).
+		WithAddress(&config.NodeAddress{Host: host, Port: port}).
 		WithRequestTimeout(5000 * time.Millisecond)
+}
+
+func getEnvStandaloneEndpoint() *config.NodeAddress {
+	endpoints := os.Getenv("GLIDE_STANDALONE_ENDPOINTS")
+	if endpoints == "" {
+		return nil
+	}
+	// Format: "host:port" or "host:port,host:port,..."
+	parts := strings.SplitN(endpoints, ",", 2)
+	hostPort := strings.SplitN(parts[0], ":", 2)
+	if len(hostPort) != 2 {
+		return nil
+	}
+	port := 6379
+	if p, err := strconv.Atoi(hostPort[1]); err == nil {
+		port = p
+	}
+	return &config.NodeAddress{Host: hostPort[0], Port: port}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
