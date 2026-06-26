@@ -1336,14 +1336,14 @@ impl Client {
         connection: &mut redis::aio::MultiplexedConnection,
     ) -> RedisResult<Value> {
         // IAM token refresh: if token rotated, re-authenticate this connection
-        if let Some(iam_manager) = &self.iam_token_manager {
-            if iam_manager.token_changed() {
-                let current_token = iam_manager.get_token().await;
-                if !current_token.is_empty() {
-                    iam_manager.clear_token_changed();
-                    let auth_cmd = redis::cmd("AUTH").arg(current_token.as_str()).to_owned();
-                    connection.send_packed_command(&auth_cmd).await?;
-                }
+        if let Some(iam_manager) = &self.iam_token_manager
+            && iam_manager.token_changed()
+        {
+            let current_token = iam_manager.get_token().await;
+            if !current_token.is_empty() {
+                iam_manager.clear_token_changed();
+                let auth_cmd = redis::cmd("AUTH").arg(current_token.as_str()).to_owned();
+                connection.send_packed_command(&auth_cmd).await?;
             }
         }
 
@@ -2653,11 +2653,9 @@ impl Client {
         let _ = self.send_command(&mut redis::cmd("DISCARD"), None).await;
 
         // Send SELECT — this must succeed
-        self.send_command(
-            &mut redis::cmd("SELECT").arg(configured_db.to_string()),
-            None,
-        )
-        .await?;
+        let mut select_cmd = redis::cmd("SELECT");
+        select_cmd.arg(configured_db.to_string());
+        self.send_command(&mut select_cmd, None).await?;
 
         Ok(())
     }

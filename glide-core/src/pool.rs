@@ -225,7 +225,7 @@ impl ClientPool {
     /// The caller is responsible for:
     /// 1. Calling `client.reset_connection_state(configured_db)` on the entry
     /// 2. Calling `return_to_idle(entry)` to put it back in the idle pool
-    /// Or on failure, calling `discard_client()` to decrement the total count.
+    ///    Or on failure, calling `discard_client()` to decrement the total count.
     pub fn take_for_release(&mut self, client_id: u64) -> Option<PooledClient> {
         let entry = self.in_use.remove(&client_id);
         entry.map(|(_, e)| e)
@@ -262,7 +262,7 @@ impl ClientPool {
         if in_use_count > 0 {
             logger_core::log_warn(
                 "pool",
-                &format!(
+                format!(
                     "Pool destroyed with {} client(s) still borrowed — possible connection leak. \
                      Ensure all acquired clients are released before closing the pool.",
                     in_use_count
@@ -516,7 +516,7 @@ impl ScopePool {
                 &connection_request_bytes,
             )
             .ok()
-            .map(|req| req.database_id as u32)
+            .map(|req| req.database_id)
             .unwrap_or(0)
         };
         #[cfg(not(feature = "proto"))]
@@ -811,9 +811,7 @@ pub fn get_or_create_scope_pool(
     )));
 
     let inserted = pools.entry(client_id).or_insert_with(|| pool.clone());
-    let result = inserted.value().clone();
-
-    result
+    inserted.value().clone()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
