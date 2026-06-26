@@ -7,10 +7,10 @@
 //! so that commands flow through the existing Java command dispatch path.
 
 use crate::jni_client::{get_handle_table, get_runtime};
-use glide_core::pool::{self, ClientPool, PoolConfig, POOL_RUNNING};
+use glide_core::pool::{self, ClientPool, POOL_RUNNING, PoolConfig};
+use jni::JNIEnv;
 use jni::objects::{JByteArray, JClass};
 use jni::sys::{jint, jlong};
-use jni::JNIEnv;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -208,7 +208,10 @@ pub extern "system" fn Java_glide_ffi_resolvers_GlidePoolResolver_glidePoolMetri
         Ok(arr) => arr,
         Err(_) => return std::ptr::null_mut(),
     };
-    if env.set_int_array_region(&result, 0, &[idle, active, total]).is_err() {
+    if env
+        .set_int_array_region(&result, 0, &[idle, active, total])
+        .is_err()
+    {
         return std::ptr::null_mut();
     }
     result.into_raw()

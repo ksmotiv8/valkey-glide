@@ -36,8 +36,8 @@ static REQUEST_ERROR_CLASS: std::sync::OnceLock<PyClassPtr> = std::sync::OnceLoc
 
 /// Get (and cache) the RequestError class from glide_shared.exceptions.
 unsafe fn get_request_error_class() -> *mut ffi::PyObject {
-    REQUEST_ERROR_CLASS.get_or_init(|| {
-        unsafe {
+    REQUEST_ERROR_CLASS
+        .get_or_init(|| unsafe {
             let mod_name =
                 ffi::PyUnicode_FromStringAndSize(c"glide_shared.exceptions".as_ptr(), 23);
             if mod_name.is_null() {
@@ -64,8 +64,8 @@ unsafe fn get_request_error_class() -> *mut ffi::PyObject {
                 return PyClassPtr(std::ptr::null_mut());
             }
             PyClassPtr(cls)
-        }
-    }).0
+        })
+        .0
 }
 
 /// Response type values — must match ffi/src/lib.rs `ResponseType` enum exactly.

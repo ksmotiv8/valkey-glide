@@ -5,10 +5,10 @@
 //! This is a thin adapter that converts JNI types and delegates all logic
 //! to `glide_core::scope` for cross-language reuse.
 
-use crate::jni_client::{complete_callback, get_runtime, JVM};
+use crate::jni_client::{JVM, complete_callback, get_runtime};
+use jni::JNIEnv;
 use jni::objects::{JByteArray, JClass};
 use jni::sys::{jint, jlong};
-use jni::JNIEnv;
 
 /// Acquire a scope from the client's internal connection pool.
 /// Returns scope_id >= 0, -1 if exhausted, -2 if invalid.
@@ -88,13 +88,8 @@ pub extern "system" fn Java_glide_ffi_resolvers_GlideScopeResolver_glideScopeExe
             parent_id.and_then(|pid| client_registry.get(&pid).map(|e| e.value().clone()))
         };
 
-        let result = glide_core::scope::execute_scope_command(
-            sid,
-            &cmd_name,
-            &args,
-            client.as_ref(),
-        )
-        .await;
+        let result =
+            glide_core::scope::execute_scope_command(sid, &cmd_name, &args, client.as_ref()).await;
 
         complete_callback(jvm, callback_id, result, false);
     });
