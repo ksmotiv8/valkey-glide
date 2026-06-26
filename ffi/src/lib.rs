@@ -5739,6 +5739,31 @@ pub extern "C" fn glide_pool_release(pool_id: u64, client_id: u64) -> i32 {
     let rt = get_pool_runtime();
     rt.spawn(async move {
         let mut entry = entry;
+        let pool_for_guard = pool_clone.clone();
+
+        // Safety: if this task is cancelled (runtime shutdown), decrement total_count
+        // to prevent a permanent slot leak. The guard is disarmed on success paths.
+        struct LeakGuard {
+            pool: Option<std::sync::Arc<tokio::sync::Mutex<glide_core::pool::ClientPool>>>,
+        }
+        impl Drop for LeakGuard {
+            fn drop(&mut self) {
+                if let Some(pool_arc) = self.pool.take() {
+                    // Best-effort: try_lock to avoid blocking in Drop
+                    if let Ok(mut pool) = pool_arc.try_lock() {
+                        pool.discard_client();
+                    } else {
+                        // Can't acquire lock in drop — decrement total_count directly
+                        // This is safe: discard_client just decrements + notifies
+                        pool_arc.blocking_lock().discard_client();
+                    }
+                }
+            }
+        }
+        let mut guard = LeakGuard {
+            pool: Some(pool_for_guard),
+        };
+
         // Reset state: DISCARD (cancel any MULTI/WATCH) + SELECT <configured_db>
         let timeout_duration = {
             let pool = pool_clone.lock().await;
@@ -5749,6 +5774,9 @@ pub extern "C" fn glide_pool_release(pool_id: u64, client_id: u64) -> i32 {
             entry.client.reset_connection_state(configured_db),
         )
         .await;
+
+        // Disarm the guard — we'll handle the outcome explicitly
+        guard.pool = None;
 
         let mut pool = pool_clone.lock().await;
         match reset_result {
@@ -5959,8 +5987,29 @@ pub unsafe extern "C" fn glide_scope_execute_async(
             return;
         }
 
-        // Inflight tracking: reserve a slot on the parent client
-        let _inflight_tracker = client.as_ref().and_then(|c| c.reserve_inflight_request());
+        // Inflight tracking: reserve a slot on the parent client (reject if exhausted)
+        let _inflight_tracker = if let Some(ref c) = client {
+            match c.reserve_inflight_request() {
+                Some(t) => Some(t),
+                None => {
+                    if span_ptr != 0 {
+                        unsafe { drop_otel_span(span_ptr) };
+                    }
+                    let msg = "Reached maximum inflight requests";
+                    let c_msg = CString::new(msg).unwrap_or_default();
+                    unsafe {
+                        failure_callback(
+                            request_id,
+                            c_msg.into_raw(),
+                            errors::RequestErrorType::Unspecified,
+                        );
+                    }
+                    return;
+                }
+            }
+        } else {
+            None
+        };
 
         // Watchdog: register for timeout diagnostics
         let cmd_start = std::time::Instant::now();
@@ -6254,10 +6303,30 @@ pub unsafe extern "C" fn glide_scope_execute(
         }));
     }
 
-    // Inflight tracking: reserve a slot on the parent client
-    let _inflight_tracker = parent_client
-        .as_ref()
-        .and_then(|c| c.reserve_inflight_request());
+    // Inflight tracking: reserve a slot on the parent client (reject if exhausted)
+    let _inflight_tracker = if let Some(ref client) = parent_client {
+        match client.reserve_inflight_request() {
+            Some(t) => Some(t),
+            None => {
+                if span_ptr != 0 {
+                    unsafe { drop_otel_span(span_ptr) };
+                }
+                let msg = "Reached maximum inflight requests";
+                let c_msg = CString::new(msg).unwrap_or_default();
+                let error = Box::into_raw(Box::new(CommandError {
+                    command_error_type: errors::RequestErrorType::Unspecified,
+                    command_error_message: c_msg.into_raw(),
+                }));
+                return Box::into_raw(Box::new(CommandResult {
+                    response: std::ptr::null_mut(),
+                    command_error: error,
+                    arena: std::ptr::null_mut(),
+                }));
+            }
+        }
+    } else {
+        None
+    };
 
     // Watchdog: register for timeout diagnostics (same as normal send path)
     let cmd_start = std::time::Instant::now();
