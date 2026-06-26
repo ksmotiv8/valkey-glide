@@ -7,7 +7,7 @@ inflight limits) are properly inherited and respected by scoped connections.
 Ensures scope operations maintain full functional parity with regular commands —
 the same options and limitations apply.
 
-Requires a running Valkey server (standalone) on localhost:6379.
+Requires a running Valkey server (standalone).
 """
 
 import threading
@@ -23,6 +23,16 @@ from glide_sync import (
     GlideClientConfiguration,
     NodeAddress,
 )
+
+
+def _get_standalone_address():
+    """Get the standalone server address from conftest (CI) or fallback to localhost."""
+    try:
+        cluster = pytest.standalone_cluster  # type: ignore[attr-defined]
+        addr = cluster.nodes_addr[0]
+        return NodeAddress(addr.host, addr.port)
+    except (AttributeError, IndexError):
+        return NodeAddress("localhost", 6379)
 
 
 # ─── Client Pooling (matches conftest pattern from #6335) ─────────────────────
@@ -85,7 +95,7 @@ def _teardown_client(client, key: str):
 def compressed_client():
     """Get or reuse a GlideClient with ZSTD compression enabled."""
     config = GlideClientConfiguration(
-        addresses=[NodeAddress("localhost", 6379)],
+        addresses=[_get_standalone_address()],
         request_timeout=5000,
         compression=CompressionConfiguration(
             enabled=True,
@@ -103,7 +113,7 @@ def compressed_client():
 def raw_client():
     """Get or reuse a GlideClient WITHOUT compression (for verification)."""
     config = GlideClientConfiguration(
-        addresses=[NodeAddress("localhost", 6379)],
+        addresses=[_get_standalone_address()],
         request_timeout=5000,
     )
     client = _get_or_create_client("raw", config)
@@ -115,7 +125,7 @@ def raw_client():
 def short_timeout_client():
     """Get or reuse a GlideClient with a short request timeout."""
     config = GlideClientConfiguration(
-        addresses=[NodeAddress("localhost", 6379)],
+        addresses=[_get_standalone_address()],
         request_timeout=100,  # 100ms
     )
     client = _get_or_create_client("short_timeout", config)
@@ -127,7 +137,7 @@ def short_timeout_client():
 def inflight_limited_client():
     """Get or reuse a GlideClient with explicit inflight limit."""
     config = GlideClientConfiguration(
-        addresses=[NodeAddress("localhost", 6379)],
+        addresses=[_get_standalone_address()],
         request_timeout=5000,
         inflight_requests_limit=500,
     )
@@ -184,7 +194,7 @@ class TestScopeCompression:
         """Values below minCompressionSize are stored uncompressed."""
         # Create client with high min threshold
         config = GlideClientConfiguration(
-            addresses=[NodeAddress("localhost", 6379)],
+            addresses=[_get_standalone_address()],
             request_timeout=5000,
             compression=CompressionConfiguration(
                 enabled=True,
@@ -270,11 +280,11 @@ class TestScopeRequestTimeout:
     def test_different_clients_different_scope_timeouts(self):
         """Each client's scopes use that client's timeout setting."""
         config_a = GlideClientConfiguration(
-            addresses=[NodeAddress("localhost", 6379)],
+            addresses=[_get_standalone_address()],
             request_timeout=5000,
         )
         config_b = GlideClientConfiguration(
-            addresses=[NodeAddress("localhost", 6379)],
+            addresses=[_get_standalone_address()],
             request_timeout=200,
         )
         client_a = _get_or_create_client("timeout_5000", config_a)
@@ -334,7 +344,7 @@ class TestScopeCombinedModifiers:
     def test_all_modifiers_active(self):
         """Scope with compression + timeout + inflight all active simultaneously."""
         config = GlideClientConfiguration(
-            addresses=[NodeAddress("localhost", 6379)],
+            addresses=[_get_standalone_address()],
             request_timeout=5000,
             inflight_requests_limit=500,
             compression=CompressionConfiguration(
@@ -361,7 +371,7 @@ class TestScopeCombinedModifiers:
 
         # Verify compression happened (raw client sees different bytes)
         raw_config = GlideClientConfiguration(
-            addresses=[NodeAddress("localhost", 6379)],
+            addresses=[_get_standalone_address()],
             request_timeout=5000,
         )
         raw_client = _get_or_create_client("raw_verify", raw_config)
@@ -384,7 +394,7 @@ class TestDatabaseStateInheritance:
         """Scope connections use the database from the client's config."""
         # Create client configured for database 2
         config = GlideClientConfiguration(
-            addresses=[NodeAddress("localhost", 6379)],
+            addresses=[_get_standalone_address()],
             request_timeout=5000,
             database_id=2,
         )
@@ -404,7 +414,7 @@ class TestDatabaseStateInheritance:
 
             # A client on database 0 should NOT see the key
             config_db0 = GlideClientConfiguration(
-                addresses=[NodeAddress("localhost", 6379)],
+                addresses=[_get_standalone_address()],
                 request_timeout=5000,
                 database_id=0,
             )
@@ -426,7 +436,7 @@ class TestDatabaseStateInheritance:
         """
         # Create client configured for database 0
         config = GlideClientConfiguration(
-            addresses=[NodeAddress("localhost", 6379)],
+            addresses=[_get_standalone_address()],
             request_timeout=5000,
             database_id=0,
         )
@@ -461,7 +471,7 @@ class TestDatabaseStateInheritance:
         from glide_sync import ClientPool, PoolConfig
 
         config = GlideClientConfiguration(
-            addresses=[NodeAddress("localhost", 6379)],
+            addresses=[_get_standalone_address()],
             request_timeout=5000,
             database_id=0,
         )
@@ -496,7 +506,7 @@ class TestDatabaseStateInheritance:
         finally:
             # Clean up key on db 5
             cleanup_config = GlideClientConfiguration(
-                addresses=[NodeAddress("localhost", 6379)],
+                addresses=[_get_standalone_address()],
                 request_timeout=5000,
                 database_id=5,
             )
@@ -513,7 +523,7 @@ class TestDatabaseStateInheritance:
         import time
 
         config = GlideClientConfiguration(
-            addresses=[NodeAddress("localhost", 6379)],
+            addresses=[_get_standalone_address()],
             request_timeout=5000,
             database_id=0,
         )
@@ -540,7 +550,7 @@ class TestDatabaseStateInheritance:
         finally:
             # Clean up key on db 4
             cleanup_config = GlideClientConfiguration(
-                addresses=[NodeAddress("localhost", 6379)],
+                addresses=[_get_standalone_address()],
                 request_timeout=5000,
                 database_id=4,
             )
@@ -559,7 +569,7 @@ class TestScopeDisconnectionBehavior:
     def test_scope_fails_after_connection_killed(self):
         """Commands fail with an error after the scope's connection is killed."""
         config = GlideClientConfiguration(
-            addresses=[NodeAddress("localhost", 6379)],
+            addresses=[_get_standalone_address()],
             request_timeout=5000,
         )
         client = GlideClient.create(config)
@@ -591,7 +601,7 @@ class TestScopeDisconnectionBehavior:
     def test_broken_scope_does_not_pollute_pool(self):
         """After a scope connection fails, the next acquire gets a healthy connection."""
         config = GlideClientConfiguration(
-            addresses=[NodeAddress("localhost", 6379)],
+            addresses=[_get_standalone_address()],
             request_timeout=5000,
         )
         client = GlideClient.create(config)
@@ -619,7 +629,7 @@ class TestScopeDisconnectionBehavior:
     def test_scope_no_auto_reconnect(self):
         """Scoped connections do not transparently reconnect — they fail fast."""
         config = GlideClientConfiguration(
-            addresses=[NodeAddress("localhost", 6379)],
+            addresses=[_get_standalone_address()],
             request_timeout=2000,
         )
         client = GlideClient.create(config)
@@ -666,7 +676,7 @@ class TestScopeInflightEnforcement:
         to stall one command, and verify the next scope command is rejected.
         """
         config = GlideClientConfiguration(
-            addresses=[NodeAddress("localhost", 6379)],
+            addresses=[_get_standalone_address()],
             request_timeout=2000,
             inflight_requests_limit=1,
         )
@@ -697,7 +707,7 @@ class TestScopeInflightEnforcement:
             # Unpause to clean up
             try:
                 unpause_config = GlideClientConfiguration(
-                    addresses=[NodeAddress("localhost", 6379)],
+                    addresses=[_get_standalone_address()],
                     request_timeout=5000,
                 )
                 unpause_client = GlideClient.create(unpause_config)

@@ -9,7 +9,10 @@ public class GlidePoolResolver {
     }
 
     public static native long glidePoolCreate(
-            int maxSize, int minIdle, long idleTimeoutMs, long requestTimeoutMs,
+            int maxSize,
+            int minIdle,
+            long idleTimeoutMs,
+            long requestTimeoutMs,
             byte[] connectionRequestBytes);
 
     public static native long glidePoolTryAcquire(long poolId);

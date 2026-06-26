@@ -12,12 +12,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * A borrowed dedicated connection for operations requiring per-connection state.
  *
- * <p>Commands bypass the multiplexer and execute on a single TCP connection.
- * Enables WATCH/MULTI/EXEC, CLIENT TRACKING, blocking commands, and pub/sub
- * without interference from other callers.
+ * <p>Commands bypass the multiplexer and execute on a single TCP connection. Enables
+ * WATCH/MULTI/EXEC, CLIENT TRACKING, blocking commands, and pub/sub without interference from other
+ * callers.
  *
- * <p><b>Thread Safety:</b> A single IsolatedScope is NOT thread-safe (serial execution).
- * Multiple threads should each acquire their own scope via {@code client.scopedConnection()}.
+ * <p><b>Thread Safety:</b> A single IsolatedScope is NOT thread-safe (serial execution). Multiple
+ * threads should each acquire their own scope via {@code client.scopedConnection()}.
  *
  * <pre>{@code
  * try (IsolatedScope scope = client.scopedConnection().get()) {
@@ -45,20 +45,51 @@ public class IsolatedScope implements AutoCloseable {
         return scopeId;
     }
 
-    public boolean isReleased() { return released.get(); }
+    public boolean isReleased() {
+        return released.get();
+    }
 
     // ========== Commands ==========
 
-    public CompletableFuture<String> watch(String... keys) { return cmd("WATCH", keys); }
-    public CompletableFuture<String> unwatch() { return cmd("UNWATCH"); }
-    public CompletableFuture<String> multi() { return cmd("MULTI"); }
-    public CompletableFuture<String> exec() { return cmd("EXEC"); }
-    public CompletableFuture<String> discard() { return cmd("DISCARD"); }
-    public CompletableFuture<String> get(String key) { return cmd("GET", key); }
-    public CompletableFuture<String> set(String key, String value) { return cmd("SET", key, value); }
-    public CompletableFuture<String> incr(String key) { return cmd("INCR", key); }
-    public CompletableFuture<String> ping() { return cmd("PING"); }
-    public CompletableFuture<String> select(int db) { return cmd("SELECT", String.valueOf(db)); }
+    public CompletableFuture<String> watch(String... keys) {
+        return cmd("WATCH", keys);
+    }
+
+    public CompletableFuture<String> unwatch() {
+        return cmd("UNWATCH");
+    }
+
+    public CompletableFuture<String> multi() {
+        return cmd("MULTI");
+    }
+
+    public CompletableFuture<String> exec() {
+        return cmd("EXEC");
+    }
+
+    public CompletableFuture<String> discard() {
+        return cmd("DISCARD");
+    }
+
+    public CompletableFuture<String> get(String key) {
+        return cmd("GET", key);
+    }
+
+    public CompletableFuture<String> set(String key, String value) {
+        return cmd("SET", key, value);
+    }
+
+    public CompletableFuture<String> incr(String key) {
+        return cmd("INCR", key);
+    }
+
+    public CompletableFuture<String> ping() {
+        return cmd("PING");
+    }
+
+    public CompletableFuture<String> select(int db) {
+        return cmd("SELECT", String.valueOf(db));
+    }
 
     /** Execute an arbitrary command on this scope. */
     public CompletableFuture<String> executeCommand(String command, String... args) {
@@ -79,7 +110,8 @@ public class IsolatedScope implements AutoCloseable {
         int result = GlideScopeResolver.glideScopeExecute(scopeId, bytes, callbackId);
 
         if (result == -1) future.completeExceptionally(new IllegalStateException("Invalid scope"));
-        else if (result == -2) future.completeExceptionally(new IllegalArgumentException("Serialize failed"));
+        else if (result == -2)
+            future.completeExceptionally(new IllegalArgumentException("Serialize failed"));
 
         return future.thenApply(r -> r == null ? null : r.toString());
     }

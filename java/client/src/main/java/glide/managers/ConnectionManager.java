@@ -51,6 +51,7 @@ public class ConnectionManager {
     private int requestTimeoutMs = 5000;
     private ServerCredentials credentials;
     private volatile boolean isClosed = false;
+
     /** Serialized protobuf ConnectionRequest bytes (stored for scope pool creation). */
     private volatile byte[] connectionRequestBytes;
 

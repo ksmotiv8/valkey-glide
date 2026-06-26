@@ -248,21 +248,20 @@ pub async fn send_scope_command(
     };
 
     // 3. Compression on write
-    if let Some(c) = client {
-        if let Some(cm) = c.compression_manager() {
-            if cm.is_enabled() {
-                let mut full_args = vec![cmd_name.as_bytes().to_vec()];
-                full_args.extend(args.iter().cloned());
-                // Resolve command type for compression routing
-                let effective_type = crate::request_type::RequestType::from_command_name(cmd_name)
-                    .unwrap_or(crate::request_type::RequestType::CustomCommand);
-                let _ = crate::compression::process_command_args_for_compression(
-                    args,
-                    effective_type,
-                    Some(cm.as_ref()),
-                );
-            }
-        }
+    if let Some(c) = client
+        && let Some(cm) = c.compression_manager()
+        && cm.is_enabled()
+    {
+        let mut full_args = vec![cmd_name.as_bytes().to_vec()];
+        full_args.extend(args.iter().cloned());
+        // Resolve command type for compression routing
+        let effective_type = crate::request_type::RequestType::from_command_name(cmd_name)
+            .unwrap_or(crate::request_type::RequestType::CustomCommand);
+        let _ = crate::compression::process_command_args_for_compression(
+            args,
+            effective_type,
+            Some(cm.as_ref()),
+        );
     }
 
     // 4. Execute

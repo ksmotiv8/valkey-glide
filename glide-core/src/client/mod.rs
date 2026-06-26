@@ -3025,6 +3025,7 @@ mod tests {
         use crate::pubsub::create_pubsub_synchronizer;
         use std::sync::Arc;
         use std::sync::atomic::AtomicIsize;
+        use std::sync::atomic::AtomicU32;
         use tokio::sync::RwLock;
 
         let config = ConnectionRequest {

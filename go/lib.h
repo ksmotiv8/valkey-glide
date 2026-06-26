@@ -1,6 +1,5 @@
 /* Copyright Valkey GLIDE Project Contributors - SPDX Identifier: Apache-2.0 */
-#ifndef GLIDE_FFI_LIB_H
-#define GLIDE_FFI_LIB_H
+#pragma once
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -1856,28 +1855,6 @@ int64_t glide_pool_create(uint32_t max_size,
                           const struct ClientType *client_type);
 
 /**
- * Create a new client-instance pool with async (callback-based) clients.
- *
- * This variant creates AsyncClient adapters suitable for Go/Java where commands
- * are dispatched via success/failure callbacks. The callbacks passed here are used
- * for ALL pooled clients created by this pool.
- *
- * Returns pool_id (positive) on success, -1 on invalid config, -2 on other errors.
- *
- * # Safety
- * `connection_request_ptr` must point to `connection_request_len` valid bytes.
- * `success_callback` and `failure_callback` must be valid function pointers.
- */
-int64_t glide_pool_create_async(uint32_t max_size,
-                                uint32_t min_idle,
-                                uint64_t idle_timeout_ms,
-                                uint64_t request_timeout_ms,
-                                const uint8_t *connection_request_ptr,
-                                uintptr_t connection_request_len,
-                                SuccessCallback success_callback,
-                                FailureCallback failure_callback);
-
-/**
  * Non-blocking acquire. Returns client_id >= 0, -1 if exhausted, -2 if invalid pool.
  */
 int64_t glide_pool_try_acquire(uint64_t pool_id);
@@ -1997,5 +1974,3 @@ int32_t glide_scope_release(uint64_t scope_id, uint64_t client_id);
 struct CommandResult *glide_scope_execute(uint64_t scope_id,
                                           const uint8_t *command_ptr,
                                           uintptr_t command_len);
-
-#endif

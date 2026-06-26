@@ -59,7 +59,6 @@ import glide.api.commands.TransactionsCommands;
 import glide.api.models.Batch;
 import glide.api.models.GlideString;
 import glide.api.models.Transaction;
-import glide.api.models.scope.IsolatedScope;
 import glide.api.models.commands.ClientPauseMode;
 import glide.api.models.commands.FailoverOptions;
 import glide.api.models.commands.FlushMode;
@@ -77,6 +76,7 @@ import glide.api.models.configuration.PubSubState;
 import glide.api.models.configuration.PubSubStateImpl;
 import glide.api.models.configuration.ServerCredentials;
 import glide.api.models.configuration.StandaloneSubscriptionConfiguration;
+import glide.api.models.scope.IsolatedScope;
 import glide.utils.ArgsBuilder;
 import java.util.Arrays;
 import java.util.Map;
@@ -109,31 +109,35 @@ public class GlideClient extends BaseClient
     /**
      * Creates a GlideClient that wraps an existing native handle from the pool.
      *
-     * <p>The pool's Rust side creates the actual connection and registers it in
-     * the JNI handle table. This factory wires up the Java command dispatch chain
-     * so that commands flow through the existing native bridge.
+     * <p>The pool's Rust side creates the actual connection and registers it in the JNI handle table.
+     * This factory wires up the Java command dispatch chain so that commands flow through the
+     * existing native bridge.
      *
      * @param nativeHandle the native client handle (same as client_id from pool)
      * @param maxInflight max inflight requests (0 = use core defaults)
      * @param requestTimeoutMs request timeout in ms (0 = no Java-side timeout)
      * @return a fully-functional GlideClient backed by the pool connection
      */
-    public static GlideClient fromPoolHandle(long nativeHandle, int maxInflight, long requestTimeoutMs) {
+    public static GlideClient fromPoolHandle(
+            long nativeHandle, int maxInflight, long requestTimeoutMs) {
         glide.internal.GlideCoreClient coreClient =
                 new glide.internal.GlideCoreClient(nativeHandle, maxInflight, requestTimeoutMs);
         glide.managers.CommandManager commandManager = new glide.managers.CommandManager(coreClient);
         glide.managers.ConnectionManager connectionManager = new glide.managers.ConnectionManager();
         glide.connectors.handlers.MessageHandler messageHandler =
                 new glide.connectors.handlers.MessageHandler(
-                        java.util.Optional.empty(), java.util.Optional.empty(),
-                        new glide.managers.BaseResponseResolver(pointer -> {
-                            if (pointer == null || pointer == 0) return null;
-                            return glide.ffi.resolvers.GlideValueResolver.valueFromPointer(pointer);
-                        }));
+                        java.util.Optional.empty(),
+                        java.util.Optional.empty(),
+                        new glide.managers.BaseResponseResolver(
+                                pointer -> {
+                                    if (pointer == null || pointer == 0) return null;
+                                    return glide.ffi.resolvers.GlideValueResolver.valueFromPointer(pointer);
+                                }));
 
-        GlideClient client = new GlideClient(
-                new ClientBuilder(connectionManager, commandManager, messageHandler,
-                        java.util.Optional.empty()));
+        GlideClient client =
+                new GlideClient(
+                        new ClientBuilder(
+                                connectionManager, commandManager, messageHandler, java.util.Optional.empty()));
 
         try {
             glide.internal.GlideCoreClient.registerClient(nativeHandle, client);
@@ -194,12 +198,12 @@ public class GlideClient extends BaseClient
     }
 
     /**
-     * Acquire an isolated scope (dedicated connection) for operations requiring
-     * per-connection server state (WATCH/MULTI/EXEC, CLIENT TRACKING, blocking commands).
+     * Acquire an isolated scope (dedicated connection) for operations requiring per-connection server
+     * state (WATCH/MULTI/EXEC, CLIENT TRACKING, blocking commands).
      *
-     * <p>The returned {@link IsolatedScope} borrows a connection from the client's internal
-     * scope pool. Commands on the scope bypass the multiplexer. Use try-with-resources
-     * to ensure the scope is returned to the pool.
+     * <p>The returned {@link IsolatedScope} borrows a connection from the client's internal scope
+     * pool. Commands on the scope bypass the multiplexer. Use try-with-resources to ensure the scope
+     * is returned to the pool.
      *
      * @param timeout maximum time to wait for a scope to become available
      * @return a Future resolving to an {@link IsolatedScope}
@@ -216,27 +220,29 @@ public class GlideClient extends BaseClient
         long timeoutMs = timeout.toMillis();
         long deadline = System.currentTimeMillis() + timeoutMs;
 
-        return CompletableFuture.supplyAsync(() -> {
-            while (true) {
-                long scopeId = glide.ffi.resolvers.GlideScopeResolver.glideScopeTryAcquire(clientId, connBytes);
-                if (scopeId >= 0) {
-                    return new IsolatedScope(scopeId, clientId);
-                }
-                // Pool exhausted — retry with backoff until deadline
-                long remaining = deadline - System.currentTimeMillis();
-                if (remaining <= 0) {
-                    throw new java.util.concurrent.CompletionException(
-                            new java.util.concurrent.TimeoutException(
-                                    "Timed out waiting for isolated scope (pool exhausted)"));
-                }
-                try {
-                    Thread.sleep(Math.min(10, remaining));
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new java.util.concurrent.CompletionException(e);
-                }
-            }
-        });
+        return CompletableFuture.supplyAsync(
+                () -> {
+                    while (true) {
+                        long scopeId =
+                                glide.ffi.resolvers.GlideScopeResolver.glideScopeTryAcquire(clientId, connBytes);
+                        if (scopeId >= 0) {
+                            return new IsolatedScope(scopeId, clientId);
+                        }
+                        // Pool exhausted — retry with backoff until deadline
+                        long remaining = deadline - System.currentTimeMillis();
+                        if (remaining <= 0) {
+                            throw new java.util.concurrent.CompletionException(
+                                    new java.util.concurrent.TimeoutException(
+                                            "Timed out waiting for isolated scope (pool exhausted)"));
+                        }
+                        try {
+                            Thread.sleep(Math.min(10, remaining));
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new java.util.concurrent.CompletionException(e);
+                        }
+                    }
+                });
     }
 
     @Override

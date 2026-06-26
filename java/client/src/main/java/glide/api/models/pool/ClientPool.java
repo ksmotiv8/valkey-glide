@@ -18,11 +18,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Client-instance pool backed by the shared Rust core.
  *
- * <p>Callers borrow a client via {@link #acquire()}, use it for commands, and return
- * it via {@link #release(long)}. The pool handles creation, LIFO reuse, bounded size,
- * and background client creation.
+ * <p>Callers borrow a client via {@link #acquire()}, use it for commands, and return it via {@link
+ * #release(long)}. The pool handles creation, LIFO reuse, bounded size, and background client
+ * creation.
  *
  * <p>Usage:
+ *
  * <pre>{@code
  * ClientPoolConfig config = ClientPoolConfig.builder()
  *     .maxSize(10)
@@ -66,12 +67,13 @@ public class ClientPool implements AutoCloseable {
         config.validate();
         byte[] connectionRequestBytes = serializeConnectionRequest(config.getClientConfig());
 
-        long poolId = GlidePoolResolver.glidePoolCreate(
-                config.getMaxSize(),
-                config.getMinIdle(),
-                config.getIdleTimeout().toMillis(),
-                config.getRequestTimeout().toMillis(),
-                connectionRequestBytes);
+        long poolId =
+                GlidePoolResolver.glidePoolCreate(
+                        config.getMaxSize(),
+                        config.getMinIdle(),
+                        config.getIdleTimeout().toMillis(),
+                        config.getRequestTimeout().toMillis(),
+                        connectionRequestBytes);
 
         if (poolId == -1) throw new IllegalArgumentException("Invalid pool configuration");
         if (poolId < 0) throw new RuntimeException("Pool creation failed: " + poolId);
@@ -85,8 +87,8 @@ public class ClientPool implements AutoCloseable {
     }
 
     /**
-     * Acquire a pooled client with default timeout. Returns a pool-aware wrapper
-     * that returns the client to the pool on close() (try-with-resources safe).
+     * Acquire a pooled client with default timeout. Returns a pool-aware wrapper that returns the
+     * client to the pool on close() (try-with-resources safe).
      */
     public CompletableFuture<PooledGlideClient> acquire() {
         return acquire(config.getAcquireTimeout());
@@ -95,8 +97,8 @@ public class ClientPool implements AutoCloseable {
     /**
      * Acquire a pooled client with custom timeout. Retries with exponential backoff.
      *
-     * <p>The returned {@link PooledGlideClient} implements AutoCloseable — its close()
-     * returns the client to the pool instead of destroying the native connection.
+     * <p>The returned {@link PooledGlideClient} implements AutoCloseable — its close() returns the
+     * client to the pool instead of destroying the native connection.
      */
     public CompletableFuture<PooledGlideClient> acquire(Duration timeout) {
         if (state.get() != RUNNING) {
@@ -105,60 +107,63 @@ public class ClientPool implements AutoCloseable {
             return f;
         }
 
-        return CompletableFuture.supplyAsync(() -> {
-            long deadlineNanos = System.nanoTime() + timeout.toNanos();
-            long backoffMs = 1;
+        return CompletableFuture.supplyAsync(
+                () -> {
+                    long deadlineNanos = System.nanoTime() + timeout.toNanos();
+                    long backoffMs = 1;
 
-            while (System.nanoTime() < deadlineNanos) {
-                if (state.get() != RUNNING) {
-                    throw new RuntimeException(new ClosingException("Pool is closed"));
-                }
-
-                long clientId = GlidePoolResolver.glidePoolTryAcquire(poolId);
-                if (clientId >= 0) {
-                    // test_on_borrow: PING to verify connection health
-                    if (config.isTestOnBorrow()) {
-                        try {
-                            GlideClient client = getClient(clientId);
-                            client.ping().get(2, java.util.concurrent.TimeUnit.SECONDS);
-                        } catch (Exception e) {
-                            // Dead connection — release and retry
-                            release(clientId);
-                            continue;
+                    while (System.nanoTime() < deadlineNanos) {
+                        if (state.get() != RUNNING) {
+                            throw new RuntimeException(new ClosingException("Pool is closed"));
                         }
+
+                        long clientId = GlidePoolResolver.glidePoolTryAcquire(poolId);
+                        if (clientId >= 0) {
+                            // test_on_borrow: PING to verify connection health
+                            if (config.isTestOnBorrow()) {
+                                try {
+                                    GlideClient client = getClient(clientId);
+                                    client.ping().get(2, java.util.concurrent.TimeUnit.SECONDS);
+                                } catch (Exception e) {
+                                    // Dead connection — release and retry
+                                    release(clientId);
+                                    continue;
+                                }
+                            }
+                            return new PooledGlideClient(getClient(clientId), ClientPool.this, clientId);
+                        }
+                        if (clientId == -2) throw new RuntimeException("Pool was destroyed");
+
+                        long remainingMs = (deadlineNanos - System.nanoTime()) / 1_000_000;
+                        long sleepMs = Math.min(backoffMs, Math.max(remainingMs, 0));
+                        if (sleepMs <= 0) break;
+                        try {
+                            Thread.sleep(sleepMs);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new RuntimeException("Acquire interrupted", e);
+                        }
+                        backoffMs = Math.min(backoffMs * 2, 50);
                     }
-                    return new PooledGlideClient(getClient(clientId), ClientPool.this, clientId);
-                }
-                if (clientId == -2) throw new RuntimeException("Pool was destroyed");
 
-                long remainingMs = (deadlineNanos - System.nanoTime()) / 1_000_000;
-                long sleepMs = Math.min(backoffMs, Math.max(remainingMs, 0));
-                if (sleepMs <= 0) break;
-                try { Thread.sleep(sleepMs); } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new RuntimeException("Acquire interrupted", e);
-                }
-                backoffMs = Math.min(backoffMs * 2, 50);
-            }
-
-            throw new RuntimeException(new java.util.concurrent.TimeoutException(
-                    "Pool exhausted: could not acquire within " + timeout));
-        });
+                    throw new RuntimeException(
+                            new java.util.concurrent.TimeoutException(
+                                    "Pool exhausted: could not acquire within " + timeout));
+                });
     }
 
     /**
-     * Get a usable GlideClient for the given client_id.
-     * Cached — no allocation on subsequent calls for the same client_id.
+     * Get a usable GlideClient for the given client_id. Cached — no allocation on subsequent calls
+     * for the same client_id.
      *
-     * <p><b>Important:</b> Do NOT call {@code close()} on the returned client.
-     * The pool manages the client's lifecycle. Call {@link #release(long)} instead
-     * to return the client to the pool.
+     * <p><b>Important:</b> Do NOT call {@code close()} on the returned client. The pool manages the
+     * client's lifecycle. Call {@link #release(long)} instead to return the client to the pool.
      */
     public GlideClient getClient(long clientId) {
         GlideClient cached = clientCache.get(clientId);
         if (cached != null) return cached;
-        return clientCache.computeIfAbsent(clientId,
-                id -> GlideClient.fromPoolHandle(id, 0, config.getRequestTimeout().toMillis()));
+        return clientCache.computeIfAbsent(
+                clientId, id -> GlideClient.fromPoolHandle(id, 0, config.getRequestTimeout().toMillis()));
     }
 
     /** Release a client back to the pool. */
@@ -202,22 +207,24 @@ public class ClientPool implements AutoCloseable {
         ConnectionRequest.Builder b = ConnectionRequest.newBuilder();
 
         for (glide.api.models.configuration.NodeAddress addr : config.getAddresses()) {
-            b.addAddresses(NodeAddress.newBuilder()
-                    .setHost(addr.getHost()).setPort(addr.getPort()).build());
+            b.addAddresses(
+                    NodeAddress.newBuilder().setHost(addr.getHost()).setPort(addr.getPort()).build());
         }
 
         b.setTlsMode(config.isUseTLS() ? TlsMode.SecureTls : TlsMode.NoTls);
         b.setClusterModeEnabled(config instanceof GlideClusterClientConfiguration);
 
-        int reqTimeout = config.getRequestTimeout() != null
-                ? config.getRequestTimeout()
-                : (int) GlideNativeBridge.getGlideCoreDefaultRequestTimeoutMs();
+        int reqTimeout =
+                config.getRequestTimeout() != null
+                        ? config.getRequestTimeout()
+                        : (int) GlideNativeBridge.getGlideCoreDefaultRequestTimeoutMs();
         b.setRequestTimeout(reqTimeout);
         b.setConnectionTimeout(reqTimeout);
 
-        int inflight = config.getInflightRequestsLimit() != null
-                ? config.getInflightRequestsLimit()
-                : GlideNativeBridge.getGlideCoreDefaultMaxInflightRequests();
+        int inflight =
+                config.getInflightRequestsLimit() != null
+                        ? config.getInflightRequestsLimit()
+                        : GlideNativeBridge.getGlideCoreDefaultMaxInflightRequests();
         b.setInflightRequestsLimit(inflight);
 
         ServerCredentials creds = config.getCredentials();

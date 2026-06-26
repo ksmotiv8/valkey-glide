@@ -5,8 +5,8 @@ import glide.api.GlideClient;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * A GlideClient borrowed from a pool. Implements AutoCloseable so that
- * try-with-resources returns the client to the pool instead of destroying it.
+ * A GlideClient borrowed from a pool. Implements AutoCloseable so that try-with-resources returns
+ * the client to the pool instead of destroying it.
  *
  * <pre>{@code
  * try (PooledGlideClient client = pool.acquire().get()) {

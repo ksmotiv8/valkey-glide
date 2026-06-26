@@ -14,8 +14,8 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /**
- * Integration tests for Feature 1: Client-Instance Pooling.
- * Requires a Valkey server (uses test infrastructure endpoints).
+ * Integration tests for Feature 1: Client-Instance Pooling. Requires a Valkey server (uses test
+ * infrastructure endpoints).
  */
 public class ClientPoolIntegrationTest {
 
@@ -28,10 +28,11 @@ public class ClientPoolIntegrationTest {
                 .maxSize(3)
                 .minIdle(1)
                 .acquireTimeout(Duration.ofSeconds(10))
-                .clientConfig(GlideClientConfiguration.builder()
-                        .address(NodeAddress.builder().host(host).port(port).build())
-                        .requestTimeout(5000)
-                        .build())
+                .clientConfig(
+                        GlideClientConfiguration.builder()
+                                .address(NodeAddress.builder().host(host).port(port).build())
+                                .requestTimeout(5000)
+                                .build())
                 .build();
     }
 
@@ -43,14 +44,15 @@ public class ClientPoolIntegrationTest {
         assertTrue(pool.getIdleCount() >= 1, "Should have at least 1 idle client");
 
         // acquire() returns PooledGlideClient — try-with-resources returns to pool
-        try (glide.api.models.pool.PooledGlideClient client = pool.acquire().get(10, TimeUnit.SECONDS)) {
+        try (glide.api.models.pool.PooledGlideClient client =
+                pool.acquire().get(10, TimeUnit.SECONDS)) {
             assertNotNull(client);
             assertTrue(client.getClientId() > 0, "client_id should be positive");
 
             String key = "pool-test-" + UUID.randomUUID();
             client.set(key, "hello").get(5, TimeUnit.SECONDS);
             assertEquals("hello", client.get(key).get(5, TimeUnit.SECONDS));
-            client.del(new String[]{key}).get(5, TimeUnit.SECONDS);
+            client.del(new String[] {key}).get(5, TimeUnit.SECONDS);
         } // auto-released back to pool
 
         pool.close();
@@ -111,32 +113,36 @@ public class ClientPoolIntegrationTest {
 
         int numThreads = 4;
         java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(numThreads);
-        java.util.concurrent.atomic.AtomicInteger successCount = new java.util.concurrent.atomic.AtomicInteger(0);
-        java.util.concurrent.atomic.AtomicInteger errorCount = new java.util.concurrent.atomic.AtomicInteger(0);
+        java.util.concurrent.atomic.AtomicInteger successCount =
+                new java.util.concurrent.atomic.AtomicInteger(0);
+        java.util.concurrent.atomic.AtomicInteger errorCount =
+                new java.util.concurrent.atomic.AtomicInteger(0);
 
         for (int t = 0; t < numThreads; t++) {
             final int threadIdx = t;
-            new Thread(() -> {
-                try (glide.api.models.pool.PooledGlideClient client =
-                        pool.acquire().get(15, TimeUnit.SECONDS)) {
-                    String key = "pool-concurrent-" + threadIdx + "-" + UUID.randomUUID();
-                    client.set(key, "thread-" + threadIdx).get(5, TimeUnit.SECONDS);
-                    String val = client.get(key).get(5, TimeUnit.SECONDS);
-                    assertEquals("thread-" + threadIdx, val);
-                    client.del(new String[]{key}).get(5, TimeUnit.SECONDS);
-                    successCount.incrementAndGet();
-                } catch (Exception e) {
-                    System.err.println("Thread " + threadIdx + " error: " + e);
-                    errorCount.incrementAndGet();
-                } finally {
-                    latch.countDown();
-                }
-            }).start();
+            new Thread(
+                            () -> {
+                                try (glide.api.models.pool.PooledGlideClient client =
+                                        pool.acquire().get(15, TimeUnit.SECONDS)) {
+                                    String key = "pool-concurrent-" + threadIdx + "-" + UUID.randomUUID();
+                                    client.set(key, "thread-" + threadIdx).get(5, TimeUnit.SECONDS);
+                                    String val = client.get(key).get(5, TimeUnit.SECONDS);
+                                    assertEquals("thread-" + threadIdx, val);
+                                    client.del(new String[] {key}).get(5, TimeUnit.SECONDS);
+                                    successCount.incrementAndGet();
+                                } catch (Exception e) {
+                                    System.err.println("Thread " + threadIdx + " error: " + e);
+                                    errorCount.incrementAndGet();
+                                } finally {
+                                    latch.countDown();
+                                }
+                            })
+                    .start();
         }
 
         assertTrue(latch.await(30, TimeUnit.SECONDS), "All threads should finish");
-        assertEquals(numThreads, successCount.get(),
-                "All threads should succeed. Errors: " + errorCount.get());
+        assertEquals(
+                numThreads, successCount.get(), "All threads should succeed. Errors: " + errorCount.get());
 
         pool.close();
         System.out.println("testPoolConcurrentAccess PASSED");
@@ -144,18 +150,23 @@ public class ClientPoolIntegrationTest {
 
     @Test
     public void testPoolTimeoutOnExhaustion() throws Exception {
-        ClientPoolConfig exhaustConfig = ClientPoolConfig.builder()
-                .maxSize(1)
-                .minIdle(1)
-                .acquireTimeout(Duration.ofSeconds(10))
-                .clientConfig(GlideClientConfiguration.builder()
-                        .address(NodeAddress.builder()
-                                .host(TestConfiguration.STANDALONE_HOSTS[0].split(":")[0])
-                                .port(Integer.parseInt(TestConfiguration.STANDALONE_HOSTS[0].split(":")[1]))
-                                .build())
-                        .requestTimeout(5000)
-                        .build())
-                .build();
+        ClientPoolConfig exhaustConfig =
+                ClientPoolConfig.builder()
+                        .maxSize(1)
+                        .minIdle(1)
+                        .acquireTimeout(Duration.ofSeconds(10))
+                        .clientConfig(
+                                GlideClientConfiguration.builder()
+                                        .address(
+                                                NodeAddress.builder()
+                                                        .host(TestConfiguration.STANDALONE_HOSTS[0].split(":")[0])
+                                                        .port(
+                                                                Integer.parseInt(
+                                                                        TestConfiguration.STANDALONE_HOSTS[0].split(":")[1]))
+                                                        .build())
+                                        .requestTimeout(5000)
+                                        .build())
+                        .build();
 
         ClientPool pool = ClientPool.create(exhaustConfig);
         Thread.sleep(3000);
@@ -168,8 +179,9 @@ public class ClientPoolIntegrationTest {
             pool.acquire(Duration.ofMillis(500)).get(2, TimeUnit.SECONDS);
             fail("Should have thrown TimeoutException");
         } catch (java.util.concurrent.ExecutionException e) {
-            assertTrue(e.getCause() instanceof java.util.concurrent.TimeoutException
-                    || e.getCause().getMessage().contains("exhausted"),
+            assertTrue(
+                    e.getCause() instanceof java.util.concurrent.TimeoutException
+                            || e.getCause().getMessage().contains("exhausted"),
                     "Expected timeout, got: " + e.getCause());
         }
 

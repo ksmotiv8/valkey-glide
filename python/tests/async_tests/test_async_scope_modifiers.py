@@ -31,6 +31,16 @@ from glide import (
 pytestmark = pytest.mark.asyncio
 
 
+def _get_standalone_address():
+    """Get the standalone server address from conftest (CI) or fallback to localhost."""
+    try:
+        cluster = pytest.standalone_cluster  # type: ignore[attr-defined]
+        addr = cluster.nodes_addr[0]
+        return NodeAddress(addr.host, addr.port)
+    except (AttributeError, IndexError):
+        return NodeAddress("localhost", 6379)
+
+
 # ─── Fixtures (standalone, --noconftest compatible) ───────────────────────────
 
 
@@ -38,7 +48,7 @@ pytestmark = pytest.mark.asyncio
 async def compressed_client():
     """Create an async GlideClient with ZSTD compression enabled."""
     config = GlideClientConfiguration(
-        addresses=[NodeAddress("localhost", 6379)],
+        addresses=[_get_standalone_address()],
         request_timeout=5000,
         compression=CompressionConfiguration(
             enabled=True,
@@ -56,7 +66,7 @@ async def compressed_client():
 async def raw_client():
     """Create an async GlideClient WITHOUT compression (for verification)."""
     config = GlideClientConfiguration(
-        addresses=[NodeAddress("localhost", 6379)],
+        addresses=[_get_standalone_address()],
         request_timeout=5000,
     )
     client = await GlideClient.create(config)
@@ -119,7 +129,7 @@ class TestAsyncDatabaseStateInheritance:
         """Scope connections use the database from the client's config."""
         # Create client configured for database 2
         config = GlideClientConfiguration(
-            addresses=[NodeAddress("localhost", 6379)],
+            addresses=[_get_standalone_address()],
             request_timeout=5000,
             database_id=2,
         )
@@ -139,7 +149,7 @@ class TestAsyncDatabaseStateInheritance:
 
             # A client on database 0 should NOT see the key
             config_db0 = GlideClientConfiguration(
-                addresses=[NodeAddress("localhost", 6379)],
+                addresses=[_get_standalone_address()],
                 request_timeout=5000,
                 database_id=0,
             )
@@ -157,7 +167,7 @@ class TestAsyncDatabaseStateInheritance:
         """If parent calls SELECT at runtime, scope inherits the runtime database."""
         # Create client configured for database 0
         config = GlideClientConfiguration(
-            addresses=[NodeAddress("localhost", 6379)],
+            addresses=[_get_standalone_address()],
             request_timeout=5000,
             database_id=0,
         )
@@ -188,7 +198,7 @@ class TestAsyncDatabaseStateInheritance:
         Next scope borrow from the same pool should be on the configured database.
         """
         config = GlideClientConfiguration(
-            addresses=[NodeAddress("localhost", 6379)],
+            addresses=[_get_standalone_address()],
             request_timeout=5000,
             database_id=0,
         )
@@ -215,7 +225,7 @@ class TestAsyncDatabaseStateInheritance:
         finally:
             # Clean up key on db 4
             cleanup_config = GlideClientConfiguration(
-                addresses=[NodeAddress("localhost", 6379)],
+                addresses=[_get_standalone_address()],
                 request_timeout=5000,
                 database_id=4,
             )
