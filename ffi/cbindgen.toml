@@ -3,6 +3,9 @@ language = "C"
 
 header = "/* Copyright Valkey GLIDE Project Contributors - SPDX Identifier: Apache-2.0 */"
 
+[defines]
+"feature = pool-support" = "GLIDE_POOL_SUPPORT"
+
 [parse]
 parse_deps = true
 include = ["glide-core"] 

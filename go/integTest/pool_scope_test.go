@@ -5,7 +5,6 @@ package integTest
 import (
 	"context"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,32 +20,20 @@ import (
 func standaloneConfig() *config.ClientConfiguration {
 	host := "localhost"
 	port := 6379
-	// CI provides standalone endpoint via env var
-	if ep := getEnvStandaloneEndpoint(); ep != nil {
-		host = ep.Host
-		port = ep.Port
+	// Use the --standalone-endpoints flag provided by CI (same flag as test suite)
+	if standaloneHosts != nil && *standaloneHosts != "" {
+		parts := strings.SplitN(*standaloneHosts, ",", 2)
+		hostPort := strings.SplitN(parts[0], ":", 2)
+		if len(hostPort) == 2 {
+			host = hostPort[0]
+			if p, err := strconv.Atoi(hostPort[1]); err == nil {
+				port = p
+			}
+		}
 	}
 	return config.NewClientConfiguration().
 		WithAddress(&config.NodeAddress{Host: host, Port: port}).
 		WithRequestTimeout(5000 * time.Millisecond)
-}
-
-func getEnvStandaloneEndpoint() *config.NodeAddress {
-	endpoints := os.Getenv("GLIDE_STANDALONE_ENDPOINTS")
-	if endpoints == "" {
-		return nil
-	}
-	// Format: "host:port" or "host:port,host:port,..."
-	parts := strings.SplitN(endpoints, ",", 2)
-	hostPort := strings.SplitN(parts[0], ":", 2)
-	if len(hostPort) != 2 {
-		return nil
-	}
-	port := 6379
-	if p, err := strconv.Atoi(hostPort[1]); err == nil {
-		port = p
-	}
-	return &config.NodeAddress{Host: hostPort[0], Port: port}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -460,7 +447,6 @@ func TestPoolCloseRejectsAcquire(t *testing.T) {
 	assert.Contains(t, err.Error(), "closed")
 }
 
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // Scope Connection Modifier Parity Tests
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -469,10 +455,8 @@ func compressedConfig() *config.ClientConfiguration {
 	compressionConfig := config.NewCompressionConfiguration().
 		WithBackend(config.ZSTD).
 		WithMinCompressionSize(64)
-	return config.NewClientConfiguration().
-		WithAddress(&config.NodeAddress{Host: "localhost", Port: 6379}).
-		WithRequestTimeout(5000 * time.Millisecond).
-		WithCompressionConfiguration(compressionConfig)
+	cfg := standaloneConfig()
+	return cfg.WithCompressionConfiguration(compressionConfig)
 }
 
 func TestScopeCompressionWritesParity(t *testing.T) {
