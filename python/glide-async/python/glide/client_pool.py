@@ -14,7 +14,6 @@ import threading
 from dataclasses import dataclass
 from typing import Optional
 
-from glide_shared._glide_ffi import _GlideFFI
 from glide_shared.config import (
     BaseClientConfiguration,
     GlideClusterClientConfiguration,
