@@ -3,6 +3,11 @@ name = "miri-tests"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Declared but NOT enabled — allows cfg(feature = "pool-support") to compile
+# without warnings while excluding pool/scope code from MIRI tests.
+pool-support = []
+
 [dependencies]
 dashmap = "5"
 libc = "0.2"
