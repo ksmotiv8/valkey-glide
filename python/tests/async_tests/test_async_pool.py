@@ -37,7 +37,8 @@ class TestAsyncClientPool:
 
     async def test_pool_create_acquire_release(self, pool_config):
         """Create pool, acquire client, execute commands, release, close."""
-        pool = await AsyncClientPool.create(pool_config, PoolConfig(max_size=3, min_idle=1))
+        pool = AsyncClientPool(pool_config, PoolConfig(max_size=3, min_idle=1))
+        await asyncio.sleep(3)  # Wait for pool warmup
 
         assert pool.idle_count >= 1
 
@@ -51,24 +52,24 @@ class TestAsyncClientPool:
         pool.close()
 
     async def test_pool_reuse(self, pool_config):
-        """LIFO: same client returned after release."""
-        pool = await AsyncClientPool.create(pool_config, PoolConfig(max_size=3, min_idle=1))
+        """LIFO: same client_id returned after release."""
+        pool = AsyncClientPool(pool_config, PoolConfig(max_size=3, min_idle=1))
+        await asyncio.sleep(3)  # Wait for pool warmup
 
-        client1 = await pool.acquire()
-        id1 = id(client1)
-        pool.release(client1)
-        await asyncio.sleep(0.05)
+        id1 = await pool.acquire()
+        pool.release(id1)
+        await asyncio.sleep(0.1)
 
-        client2 = await pool.acquire()
-        id2 = id(client2)
-        pool.release(client2)
+        id2 = await pool.acquire()
+        pool.release(id2)
 
         assert id1 == id2
         pool.close()
 
     async def test_pool_metrics(self, pool_config):
         """Metrics reflect pool state."""
-        pool = await AsyncClientPool.create(pool_config, PoolConfig(max_size=3, min_idle=2))
+        pool = AsyncClientPool(pool_config, PoolConfig(max_size=3, min_idle=2))
+        await asyncio.sleep(3)  # Wait for pool warmup
 
         assert pool.idle_count >= 1
         assert pool.total_count >= 1
@@ -77,21 +78,23 @@ class TestAsyncClientPool:
 
     async def test_pool_exhaustion_timeout(self, pool_config):
         """Timeout when pool is exhausted."""
-        pool = await AsyncClientPool.create(pool_config, PoolConfig(max_size=1, min_idle=1))
+        pool = AsyncClientPool(pool_config, PoolConfig(max_size=1, min_idle=1))
+        await asyncio.sleep(3)  # Wait for pool warmup
 
         # Acquire the only client
-        client = await pool.acquire()
+        client_id = await pool.acquire()
 
         # Second acquire should timeout
         with pytest.raises(TimeoutError):
             await pool.acquire(timeout=0.5)
 
-        pool.release(client)
+        pool.release(client_id)
         pool.close()
 
     async def test_pool_concurrent_access(self, pool_config):
         """Multiple tasks borrow/release concurrently."""
-        pool = await AsyncClientPool.create(pool_config, PoolConfig(max_size=4, min_idle=4))
+        pool = AsyncClientPool(pool_config, PoolConfig(max_size=4, min_idle=4))
+        await asyncio.sleep(3)  # Wait for pool warmup
 
         errors = []
 
@@ -114,7 +117,8 @@ class TestAsyncClientPool:
 
     async def test_pool_close_rejects_acquire(self, pool_config):
         """Closed pool rejects acquire."""
-        pool = await AsyncClientPool.create(pool_config, PoolConfig(max_size=2, min_idle=1))
+        pool = AsyncClientPool(pool_config, PoolConfig(max_size=2, min_idle=1))
+        await asyncio.sleep(3)  # Wait for pool warmup
 
         pool.close()
 

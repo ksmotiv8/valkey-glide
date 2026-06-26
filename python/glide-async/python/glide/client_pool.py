@@ -1,37 +1,33 @@
 # Copyright Valkey GLIDE Project Contributors - SPDX Identifier: Apache-2.0
 
 """
-Async client-instance pool for the GLIDE async client (Feature 1).
+Async client-instance pool — FFI-based, backed by shared Rust pool.
 
-Backed by the shared Rust pool in glide-core via FFI. The Rust pool owns
-client lifecycle (creation, LIFO reuse, bounded size). This Python class
-provides the async acquire-with-timeout and maps client_id handles to usable
-async GlideClient wrappers.
-
-Usage:
-    from glide import GlideClient
-    from glide.client_pool import AsyncClientPool, PoolConfig
-    from glide.config import GlideClientConfiguration, NodeAddress
-
-    config = GlideClientConfiguration([NodeAddress("localhost", 6379)])
-    pool = AsyncClientPool(config, PoolConfig(max_size=10, min_idle=2))
-
-    async with pool.borrow() as client:
-        await client.set("key", "value")
-        result = await client.get("key")
-
-    pool.close()
+Same architecture as Python sync, Go, and Java pools. Uses the unified
+glide_pool_create with AsyncClient type. Responses route through the
+shared async pipe (same as normal GlideClient.create() clients).
 """
 
 import asyncio
+import os
 import threading
-
 from dataclasses import dataclass
 from typing import Optional
 
-from glide_shared.config import BaseClientConfiguration
+from glide_shared._glide_ffi import _GlideFFI
+from glide_shared.config import (
+    BaseClientConfiguration,
+    GlideClusterClientConfiguration,
+)
 
-from .glide_client import GlideClient, _ASYNC_FFI
+from .glide_client import (
+    BaseClient,
+    GlideClient,
+    GlideClusterClient,
+    _ASYNC_FFI,
+    _async_pipe_lock,
+    _client_registry,
+)
 
 
 @dataclass
@@ -39,180 +35,169 @@ class PoolConfig:
     """Configuration for the async client-instance pool."""
 
     max_size: int = 10
-    """Maximum number of clients in the pool."""
-
     min_idle: int = 1
-    """Minimum idle clients to pre-warm at creation."""
-
     idle_timeout_ms: int = 300_000
-    """Evict idle clients after this duration (ms). Default: 5 minutes."""
-
     request_timeout_ms: int = 5_000
-    """Request timeout for commands (ms)."""
-
     acquire_timeout_s: float = 5.0
-    """Maximum time to wait when pool is exhausted (seconds)."""
-
     test_on_borrow: bool = False
-    """Send PING when acquiring a client to verify connection health.
-    Adds one round-trip per acquire but catches stale/broken connections early."""
 
 
 class AsyncClientPool:
-    """
-    Async client-instance pool.
-
-    Unlike the sync pool which delegates entirely to Rust, the async pool
-    manages fully-formed GlideClient instances created via the normal
-    GlideClient.create() path. This ensures each pooled client has proper
-    async pipe registration for response delivery.
-
-    The pool provides: bounded size, acquire-with-timeout, LIFO reuse.
-    """
+    """FFI-based async client pool. Same Rust pool as all other languages."""
 
     __slots__ = (
-        "_client_config",
-        "_pool_config",
-        "_closed",
-        "_idle",
-        "_in_use",
-        "_lock",
-        "_release_event",
-        "_total",
-        "_ffi",
-        "_lib",
+        "_ffi", "_lib", "_client_config", "_pool_config", "_closed",
+        "_client_cache", "_conn_req_bytes", "_pool_id", "_cache_lock", "_is_cluster",
     )
 
-    def __init__(
-        self,
-        client_config: BaseClientConfiguration,
-        pool_config: Optional[PoolConfig] = None,
-    ):
-        self._client_config = client_config
-        self._pool_config = pool_config or PoolConfig()
-        self._closed = False
-        self._idle: list = []  # LIFO stack of GlideClient
-        self._in_use: set = set()  # set of id(client)
-        self._lock = asyncio.Lock() if asyncio else threading.Lock()
-        self._release_event = asyncio.Event()
-        self._total = 0
+    def __init__(self, client_config: BaseClientConfiguration, pool_config: Optional[PoolConfig] = None):
         ffi_instance = _ASYNC_FFI
         self._ffi = ffi_instance.ffi
         self._lib = ffi_instance.lib
+        self._client_config = client_config
+        self._pool_config = pool_config or PoolConfig()
+        self._closed = False
+        self._client_cache: dict = {}
+        self._cache_lock = threading.Lock()
+        self._is_cluster = isinstance(client_config, GlideClusterClientConfiguration)
 
-    async def _warmup(self):
-        """Pre-create min_idle clients."""
-        for _ in range(self._pool_config.min_idle):
-            if self._total >= self._pool_config.max_size:
-                break
-            client = await GlideClient.create(self._client_config)
-            self._idle.append(client)
-            self._total += 1
+        # Serialize connection request
+        conn_req = client_config._create_a_protobuf_conn_request(cluster_mode=self._is_cluster)
+        conn_req.lib_name = "GlidePyAsync"
+        self._conn_req_bytes = conn_req.SerializeToString()
 
-    @classmethod
-    async def create(cls, client_config, pool_config=None):
-        """Create and warm up the pool."""
-        pool = cls(client_config, pool_config)
-        await pool._warmup()
-        return pool
+        # Initialize the shared async pipe BEFORE creating pool clients.
+        # This ensures ASYNC_PIPE is set so pooled AsyncClient adapters
+        # write responses to the pipe (not the callback path).
+        import glide.glide_client as _gc
+        with _async_pipe_lock:
+            if _gc._async_pipe_read_fd < 0:
+                try:
+                    r, w = os.pipe()
+                    os.set_blocking(r, False)
+                    self._lib.init_async_pipe(w)
+                    _gc._async_pipe_read_fd = r
+                except OSError:
+                    pass
 
-    async def acquire(self, timeout: Optional[float] = None) -> "GlideClient":
-        """Acquire a client from the pool."""
+        # Create pool with AsyncClient type (no-op callbacks — pipe handles responses)
+        client_type = self._ffi.new("ClientType*")
+        client_type._type = 0  # AsyncClient
+        client_type.async_client.success_callback = self._lib.noop_success_callback
+        client_type.async_client.failure_callback = self._lib.noop_failure_callback
+        client_type.async_client.allow_stack_response = False
+
+        buf = self._ffi.from_buffer(self._conn_req_bytes)
+        pool_id = self._lib.glide_pool_create(
+            self._pool_config.max_size,
+            self._pool_config.min_idle,
+            self._pool_config.idle_timeout_ms,
+            self._pool_config.request_timeout_ms,
+            self._ffi.cast("const uint8_t*", buf),
+            len(self._conn_req_bytes),
+            client_type,
+        )
+        if pool_id < 0:
+            raise RuntimeError(f"Failed to create pool: error code {pool_id}")
+        self._pool_id = pool_id
+
+    async def acquire(self, timeout: Optional[float] = None) -> int:
+        """Acquire a client_id (non-blocking via executor)."""
         if self._closed:
             raise RuntimeError("Pool is closed")
-
         timeout = timeout or self._pool_config.acquire_timeout_s
-        deadline = asyncio.get_event_loop().time() + timeout
+        timeout_ms = int(timeout * 1000)
+        loop = asyncio.get_running_loop()
+        client_id = await loop.run_in_executor(
+            None, self._lib.glide_pool_acquire_blocking, self._pool_id, timeout_ms
+        )
+        if client_id >= 0:
+            return client_id
+        if client_id == -2:
+            raise RuntimeError("Invalid pool_id — pool was destroyed")
+        raise TimeoutError(f"Pool exhausted: could not acquire client within {timeout}s")
 
-        while True:
-            # Try to pop from idle
-            if self._idle:
-                client = self._idle.pop()  # LIFO
-
-                # Health check if configured
-                if self._pool_config.test_on_borrow:
-                    try:
-                        await asyncio.wait_for(client.ping(), timeout=2.0)
-                    except Exception:
-                        # Connection is dead — discard and try next
-                        self._total -= 1
-                        try:
-                            client.close()
-                        except Exception:
-                            pass
-                        continue
-
-                self._in_use.add(id(client))
-                return client
-
-            # Try to create a new one if under max
-            if self._total < self._pool_config.max_size:
-                self._total += 1
-                try:
-                    client = await GlideClient.create(self._client_config)
-                    self._in_use.add(id(client))
-                    return client
-                except Exception:
-                    self._total -= 1
-                    raise
-
-            # Pool exhausted — wait for release
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                raise TimeoutError(
-                    f"Pool exhausted: could not acquire client within {timeout}s"
-                )
-
-            self._release_event.clear()
-            try:
-                await asyncio.wait_for(self._release_event.wait(), timeout=min(remaining, 0.1))
-            except asyncio.TimeoutError:
-                pass
-
-    def release(self, client: "GlideClient") -> None:
-        """Release a client back to the pool."""
-        self._in_use.discard(id(client))
-        if not self._closed:
-            self._idle.append(client)
-            self._release_event.set()
-        else:
-            self._total -= 1
+    def release(self, client_id: int) -> None:
+        """Release a borrowed client back to the pool."""
+        self._lib.glide_pool_release(self._pool_id, client_id)
 
     def borrow(self, timeout: Optional[float] = None):
-        """Async context manager for borrowing a client."""
+        """Async context manager."""
         return _AsyncBorrowContext(self, timeout)
+
+    def _get_or_create_client(self, client_id: int) -> BaseClient:
+        """Get/create a client wrapper with pipe registration."""
+        cached = self._client_cache.get(client_id)
+        if cached is not None:
+            return cached
+
+        with self._cache_lock:
+            cached = self._client_cache.get(client_id)
+            if cached is not None:
+                return cached
+
+            adapter_ptr = self._lib.glide_pool_get_client_ptr(client_id)
+            if adapter_ptr == 0:
+                raise RuntimeError(f"Pool client_id {client_id} has no associated ClientAdapter")
+
+            ClientClass = GlideClusterClient if self._is_cluster else GlideClient
+            client = object.__new__(ClientClass)
+            client.config = self._client_config
+            client._is_closed = False
+            client._ffi = self._ffi
+            client._lib = self._lib
+            client._pending_futures = {}
+            client._pending_push_notifications = []
+            client._pubsub_futures = []
+            client._pubsub_lock = threading.Lock()
+            client._pubsub_callback_ref = None
+            client._callback_id_gen = __import__("itertools").count(1)
+            client._lock = threading.Lock()
+            client._is_asyncio = True
+            client._core_client = self._ffi.cast("void*", adapter_ptr)
+
+            # The pool created this client with pipe_client_id = client_id
+            # (set in create_client_internal via the pre-assigned ID).
+            # Register so the pipe reader routes responses here.
+            client._pipe_client_id = client_id
+            try:
+                client._loop = asyncio.get_running_loop()
+            except RuntimeError:
+                client._loop = None
+
+            _client_registry[client_id] = client
+            client._setup_pipe()
+
+            self._client_cache[client_id] = client
+            return client
 
     @property
     def idle_count(self) -> int:
-        return len(self._idle)
+        idle = self._ffi.new("uint32_t*")
+        self._lib.glide_pool_metrics(self._pool_id, idle, self._ffi.NULL, self._ffi.NULL)
+        return idle[0]
 
     @property
     def active_count(self) -> int:
-        return len(self._in_use)
+        active = self._ffi.new("uint32_t*")
+        self._lib.glide_pool_metrics(self._pool_id, self._ffi.NULL, active, self._ffi.NULL)
+        return active[0]
 
     @property
     def total_count(self) -> int:
-        return self._total
+        total = self._ffi.new("uint32_t*")
+        self._lib.glide_pool_metrics(self._pool_id, self._ffi.NULL, self._ffi.NULL, total)
+        return total[0]
 
     def close(self):
-        """Close the pool and all clients."""
         if not self._closed:
             self._closed = True
-            if self._in_use:
-                import warnings
-                warnings.warn(
-                    f"AsyncClientPool closed with {len(self._in_use)} client(s) still borrowed",
-                    ResourceWarning,
-                    stacklevel=2,
-                )
-            for client in self._idle:
-                # Don't await close — clients will clean up via __del__/finalizer
-                # Closing synchronously in an async context triggers warnings
-                pass
-            self._idle.clear()
+            for cid in list(self._client_cache.keys()):
+                _client_registry.pop(cid, None)
+            self._lib.glide_pool_destroy(self._pool_id)
+            self._client_cache.clear()
 
     async def aclose(self):
-        """Async close."""
         self.close()
 
     async def __aenter__(self):
@@ -231,21 +216,17 @@ class AsyncClientPool:
 
 
 class _AsyncBorrowContext:
-    """Async context manager for pool borrow/release."""
-
-    __slots__ = ("_pool", "_timeout", "_client")
+    __slots__ = ("_pool", "_timeout", "_client_id")
 
     def __init__(self, pool: AsyncClientPool, timeout):
         self._pool = pool
         self._timeout = timeout
-        self._client = None
+        self._client_id = -1
 
     async def __aenter__(self):
-        self._client = await self._pool.acquire(self._timeout)
-        return self._client
+        self._client_id = await self._pool.acquire(self._timeout)
+        return self._pool._get_or_create_client(self._client_id)
 
     async def __aexit__(self, *_):
-        if self._client is not None:
-            self._pool.release(self._client)
-            self._client = None
+        self._pool.release(self._client_id)
         return False
