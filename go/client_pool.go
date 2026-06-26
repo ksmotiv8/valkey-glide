@@ -108,15 +108,22 @@ func NewClientPool(clientConfig *config.ClientConfiguration, poolConfig PoolConf
 	}
 
 	// Create the Rust pool with async clients (uses Go's success/failure callbacks)
-	poolID := C.glide_pool_create_async(
+	clientType, err := buildAsyncClientType(
+		C.SuccessCallback(unsafe.Pointer(C.successCallback)),
+		C.FailureCallback(unsafe.Pointer(C.failureCallback)),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	poolID := C.glide_pool_create(
 		C.uint32_t(poolConfig.MaxSize),
 		C.uint32_t(poolConfig.MinIdle),
 		C.uint64_t(poolConfig.IdleTimeout.Milliseconds()),
 		C.uint64_t(poolConfig.RequestTimeout.Milliseconds()),
 		(*C.uint8_t)(unsafe.Pointer(&connReqBytes[0])),
 		C.uintptr_t(len(connReqBytes)),
-		C.SuccessCallback(C.successCallback),
-		C.FailureCallback(C.failureCallback),
+		&clientType,
 	)
 	if poolID < 0 {
 		return nil, errors.New("failed to create pool")

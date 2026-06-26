@@ -100,7 +100,9 @@ class ClientPool:
         )
         self._conn_req_bytes = conn_req.SerializeToString()
 
-        # Create the Rust pool via FFI
+        # Create the Rust pool via FFI (SyncClient type)
+        client_type = self._ffi.new("ClientType*")
+        client_type._type = 1  # Sync = 1 (from ClientTypeEnum)
         pool_id = self._lib.glide_pool_create(
             self._pool_config.max_size,
             self._pool_config.min_idle,
@@ -108,6 +110,7 @@ class ClientPool:
             self._pool_config.request_timeout_ms,
             self._conn_req_bytes,
             len(self._conn_req_bytes),
+            client_type,
         )
 
         if pool_id == -1:

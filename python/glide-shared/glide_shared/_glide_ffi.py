@@ -396,7 +396,8 @@ class _GlideFFI:
                 uint64_t idle_timeout_ms,
                 uint64_t request_timeout_ms,
                 const uint8_t* connection_request_ptr,
-                size_t connection_request_len
+                size_t connection_request_len,
+                const ClientType* client_type
             );
             int64_t glide_pool_try_acquire(uint64_t pool_id);
             int64_t glide_pool_acquire_blocking(uint64_t pool_id, uint64_t timeout_ms);

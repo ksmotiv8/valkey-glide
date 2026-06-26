@@ -5320,6 +5320,14 @@ fn get_pool_clients() -> &'static dashmap::DashMap<u64, PoolClientEntry> {
     POOL_CLIENTS.get_or_init(dashmap::DashMap::new)
 }
 
+/// Maps pool_id → ClientType for background client creation.
+static POOL_CLIENT_TYPES: std::sync::OnceLock<dashmap::DashMap<u64, ClientType>> =
+    std::sync::OnceLock::new();
+
+fn get_pool_client_types() -> &'static dashmap::DashMap<u64, ClientType> {
+    POOL_CLIENT_TYPES.get_or_init(dashmap::DashMap::new)
+}
+
 /// Create a GlideClient + ClientAdapter for the pool.
 /// Runs on a dedicated thread (not inside an existing runtime) to avoid nesting.
 /// Create a pool client using the standard create_client_internal path.
@@ -5355,11 +5363,17 @@ fn create_pool_client(
 
 /// Create a new client-instance pool.
 ///
-/// Spawns `min_idle` background client creation tasks. Returns pool_id (positive)
-/// on success, -1 on invalid config, -2 on other errors.
+/// Creates pooled clients of the specified type. All languages use this single
+/// entry point — pass the appropriate ClientType:
+/// - Python sync/Ruby: `ClientType { tag: SyncClient }`
+/// - Go/Java: `ClientType { tag: AsyncClient, success_callback, failure_callback }`
+/// - Python async: `ClientType { tag: AsyncClient }` with pipe (no callbacks needed)
+///
+/// Returns pool_id (positive) on success, -1 on invalid config, -2 on other errors.
 ///
 /// # Safety
 /// `connection_request_ptr` must point to `connection_request_len` valid bytes.
+/// `client_type` must be a valid pointer to a `ClientType`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn glide_pool_create(
     max_size: u32,
@@ -5368,6 +5382,7 @@ pub unsafe extern "C" fn glide_pool_create(
     request_timeout_ms: u64,
     connection_request_ptr: *const u8,
     connection_request_len: usize,
+    client_type: *const ClientType,
 ) -> i64 {
     let connection_request = if connection_request_ptr.is_null() || connection_request_len == 0 {
         Vec::new()
@@ -5376,6 +5391,14 @@ pub unsafe extern "C" fn glide_pool_create(
             .to_vec()
     };
 
+    let ct = if client_type.is_null() {
+        ClientType::SyncClient
+    } else {
+        unsafe { (*client_type).clone() }
+    };
+
+    let is_async = !matches!(ct, ClientType::SyncClient);
+
     let config = PoolConfig {
         max_size,
         min_idle,
@@ -5383,6 +5406,7 @@ pub unsafe extern "C" fn glide_pool_create(
         request_timeout: std::time::Duration::from_millis(request_timeout_ms),
         test_on_borrow: false,
         connection_request: connection_request.clone(),
+        is_async,
     };
 
     let pool = match ClientPool::new(config) {
@@ -5392,15 +5416,19 @@ pub unsafe extern "C" fn glide_pool_create(
 
     let pool_id = pool::register_pool(pool);
 
+    // Store the ClientType for background creation
+    get_pool_client_types().insert(pool_id, ct.clone());
+
     // Spawn min_idle background client creation
     if min_idle > 0 {
         let pool_arc = pool::get_pool(pool_id).unwrap();
         for _ in 0..min_idle {
             let pool_clone = pool_arc.clone();
             let bytes = connection_request.clone();
+            let ct_clone = ct.clone();
             std::thread::spawn(move || {
                 let pre_cid = glide_core::pool::allocate_client_id() as usize;
-                match create_pool_client(&bytes, ClientType::SyncClient, pre_cid) {
+                match create_pool_client(&bytes, ct_clone, pre_cid) {
                     Ok((adapter_ptr, client)) => {
                         let rt = get_pool_runtime();
                         rt.block_on(async {
@@ -5479,6 +5507,7 @@ pub unsafe extern "C" fn glide_pool_create_async(
         idle_timeout: std::time::Duration::from_millis(idle_timeout_ms),
         request_timeout: std::time::Duration::from_millis(request_timeout_ms),
         test_on_borrow: false,
+        is_async: true,
         connection_request: connection_request.clone(),
     };
 
@@ -5577,7 +5606,11 @@ pub extern "C" fn glide_pool_try_acquire(pool_id: u64) -> i64 {
                 drop(pool);
                 std::thread::spawn(move || {
                     let pre_cid = glide_core::pool::allocate_client_id() as usize;
-                    match create_pool_client(&bytes, ClientType::SyncClient, pre_cid) {
+                    let bg_ct = get_pool_client_types()
+                        .get(&pool_id)
+                        .map(|e| e.value().clone())
+                        .unwrap_or(ClientType::SyncClient);
+                    match create_pool_client(&bytes, bg_ct, pre_cid) {
                         Ok((adapter_ptr, client)) => {
                             let rt = get_pool_runtime();
                             rt.block_on(async {
@@ -5669,7 +5702,11 @@ pub extern "C" fn glide_pool_acquire_blocking(pool_id: u64, timeout_ms: u64) -> 
                             drop(pool);
                             std::thread::spawn(move || {
                                 let pre_cid = glide_core::pool::allocate_client_id() as usize;
-                                match create_pool_client(&bytes, ClientType::SyncClient, pre_cid) {
+                                let bg_ct = get_pool_client_types()
+                                    .get(&pool_id)
+                                    .map(|e| e.value().clone())
+                                    .unwrap_or(ClientType::SyncClient);
+                                match create_pool_client(&bytes, bg_ct, pre_cid) {
                                     Ok((adapter_ptr, client)) => {
                                         let rt = get_pool_runtime();
                                         rt.block_on(async {

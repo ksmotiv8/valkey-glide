@@ -66,6 +66,11 @@ pub struct PoolConfig {
     pub test_on_borrow: bool,
     /// Serialized protobuf ConnectionRequest for background client creation.
     pub connection_request: Vec<u8>,
+    /// Client type tag: 0 = SyncClient, 1 = AsyncClient.
+    /// Stored as u8 to avoid storing function pointers in the config.
+    /// The actual ClientType (with callbacks) is passed at pool creation time
+    /// and stored separately in the pool registry for background creation.
+    pub is_async: bool,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

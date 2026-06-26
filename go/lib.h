@@ -1835,18 +1835,25 @@ void close_monitor_client(const void *client_ptr);
 /**
  * Create a new client-instance pool.
  *
- * Spawns `min_idle` background client creation tasks. Returns pool_id (positive)
- * on success, -1 on invalid config, -2 on other errors.
+ * Creates pooled clients of the specified type. All languages use this single
+ * entry point — pass the appropriate ClientType:
+ * - Python sync/Ruby: `ClientType { tag: SyncClient }`
+ * - Go/Java: `ClientType { tag: AsyncClient, success_callback, failure_callback }`
+ * - Python async: `ClientType { tag: AsyncClient }` with pipe (no callbacks needed)
+ *
+ * Returns pool_id (positive) on success, -1 on invalid config, -2 on other errors.
  *
  * # Safety
  * `connection_request_ptr` must point to `connection_request_len` valid bytes.
+ * `client_type` must be a valid pointer to a `ClientType`.
  */
 int64_t glide_pool_create(uint32_t max_size,
                           uint32_t min_idle,
                           uint64_t idle_timeout_ms,
                           uint64_t request_timeout_ms,
                           const uint8_t *connection_request_ptr,
-                          uintptr_t connection_request_len);
+                          uintptr_t connection_request_len,
+                          const struct ClientType *client_type);
 
 /**
  * Create a new client-instance pool with async (callback-based) clients.
@@ -1900,6 +1907,13 @@ int32_t glide_pool_destroy(uint64_t pool_id);
  * Language bindings pass this to `command()` for dispatch.
  */
 uintptr_t glide_pool_get_client_ptr(uint64_t client_id);
+
+/**
+ * Set the pipe_client_id on a pooled client adapter.
+ * Required for async clients (Python async, Node) that use the shared pipe
+ * for response delivery. Call this after acquire, before sending commands.
+ */
+int32_t glide_pool_set_pipe_client_id(uint64_t client_id, uint64_t pipe_client_id);
 
 /**
  * Query pool metrics. Writes idle/active/total to out pointers.
@@ -1984,4 +1998,4 @@ struct CommandResult *glide_scope_execute(uint64_t scope_id,
                                           const uint8_t *command_ptr,
                                           uintptr_t command_len);
 
-#endif /* GLIDE_FFI_LIB_H */
+#endif
