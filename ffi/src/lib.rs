@@ -5940,6 +5940,25 @@ pub unsafe extern "C" fn glide_scope_execute_async(
         // OTel: create span for scope command
         let span_ptr = create_otel_span(RequestType::CustomCommand);
 
+        // Circuit breaker: reject immediately if parent's CB is open
+        if let Some(ref c) = client
+            && !c.is_circuit_breaker_healthy()
+        {
+            if span_ptr != 0 {
+                unsafe { drop_otel_span(span_ptr) };
+            }
+            let msg = "Client circuit breaker is open - core unhealthy";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            unsafe {
+                failure_callback(
+                    request_id,
+                    c_msg.into_raw(),
+                    errors::RequestErrorType::Disconnect,
+                );
+            }
+            return;
+        }
+
         // Inflight tracking: reserve a slot on the parent client
         let _inflight_tracker = client.as_ref().and_then(|c| c.reserve_inflight_request());
 
@@ -6214,6 +6233,26 @@ pub unsafe extern "C" fn glide_scope_execute(
 
     // OTel: create span for scope command
     let span_ptr = create_otel_span(RequestType::CustomCommand);
+
+    // Circuit breaker: reject immediately if parent's CB is open
+    if let Some(ref client) = parent_client
+        && !client.is_circuit_breaker_healthy()
+    {
+        if span_ptr != 0 {
+            unsafe { drop_otel_span(span_ptr) };
+        }
+        let msg = "Client circuit breaker is open - core unhealthy";
+        let c_msg = CString::new(msg).unwrap_or_default();
+        let error = Box::into_raw(Box::new(CommandError {
+            command_error_type: errors::RequestErrorType::Disconnect,
+            command_error_message: c_msg.into_raw(),
+        }));
+        return Box::into_raw(Box::new(CommandResult {
+            response: std::ptr::null_mut(),
+            command_error: error,
+            arena: std::ptr::null_mut(),
+        }));
+    }
 
     // Inflight tracking: reserve a slot on the parent client
     let _inflight_tracker = parent_client
