@@ -19,7 +19,6 @@ import uuid
 
 import pytest
 import pytest_asyncio
-
 from glide import (
     CompressionBackend,
     CompressionConfiguration,
@@ -95,9 +94,9 @@ class TestAsyncScopeCompression:
 
         # Read with raw client (no compression) — should differ (compressed bytes)
         raw_result = await raw_client.get(key)
-        assert raw_result != large_value.encode(), (
-            "Value stored via compressed scope should be compressed in Valkey"
-        )
+        assert (
+            raw_result != large_value.encode()
+        ), "Value stored via compressed scope should be compressed in Valkey"
 
         # Cleanup
         await compressed_client.delete([key])
@@ -155,9 +154,9 @@ class TestAsyncDatabaseStateInheritance:
             )
             client_db0 = await GlideClient.create(config_db0)
             result_db0 = await client_db0.get(key)
-            assert result_db0 is None, (
-                "Key written on db2 via scope should not be visible on db0"
-            )
+            assert (
+                result_db0 is None
+            ), "Key written on db2 via scope should not be visible on db0"
             await client_db0.aclose()
         finally:
             await client.custom_command(["DEL", key])
@@ -182,9 +181,9 @@ class TestAsyncDatabaseStateInheritance:
             # Scope should inherit the parent's current database (3)
             async with await client.scoped_connection() as scope:
                 result = await scope.get(key)
-                assert result == "on-db3", (
-                    "Scope should inherit parent's current runtime database (3)"
-                )
+                assert (
+                    result == "on-db3"
+                ), "Scope should inherit parent's current runtime database (3)"
 
             # Clean up: delete key on db 3 and switch parent back
             await client.custom_command(["DEL", key])

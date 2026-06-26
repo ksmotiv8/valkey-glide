@@ -14,7 +14,6 @@ import threading
 import uuid
 
 import pytest
-
 from glide_sync import (
     Batch,
     CompressionBackend,
@@ -167,9 +166,9 @@ class TestScopeCompression:
 
         # Read with raw client (no compression) — should differ (compressed bytes)
         raw_result = raw_client.get(key)
-        assert raw_result != large_value.encode(), (
-            "Value stored via compressed scope should be compressed in Valkey"
-        )
+        assert (
+            raw_result != large_value.encode()
+        ), "Value stored via compressed scope should be compressed in Valkey"
 
         # Cleanup
         compressed_client.delete([key])
@@ -213,9 +212,9 @@ class TestScopeCompression:
 
         # Raw client should see the original value (not compressed)
         raw_result = raw_client.get(key)
-        assert raw_result == small_value.encode(), (
-            "Small values below minCompressionSize should NOT be compressed"
-        )
+        assert (
+            raw_result == small_value.encode()
+        ), "Small values below minCompressionSize should NOT be compressed"
 
         # Cleanup
         client.delete([key])
@@ -376,9 +375,9 @@ class TestScopeCombinedModifiers:
         )
         raw_client = _get_or_create_client("raw_verify", raw_config)
         raw_value = raw_client.get(key)
-        assert raw_value != large_value.encode(), (
-            "Data should be stored compressed in Valkey"
-        )
+        assert (
+            raw_value != large_value.encode()
+        ), "Data should be stored compressed in Valkey"
 
         # Cleanup
         client.delete([key])
@@ -420,9 +419,9 @@ class TestDatabaseStateInheritance:
             )
             client_db0 = GlideClient.create(config_db0)
             result_db0 = client_db0.get(key)
-            assert result_db0 is None, (
-                "Key written on db2 via scope should not be visible on db0"
-            )
+            assert (
+                result_db0 is None
+            ), "Key written on db2 via scope should not be visible on db0"
             client_db0.close()
         finally:
             client.custom_command(["DEL", key])
@@ -451,9 +450,9 @@ class TestDatabaseStateInheritance:
             # Scope should inherit the parent's current database (3)
             with client.scoped_connection() as scope:
                 result = scope.get(key)
-                assert result == "on-db3", (
-                    "Scope should inherit parent's current runtime database (3)"
-                )
+                assert (
+                    result == "on-db3"
+                ), "Scope should inherit parent's current runtime database (3)"
 
             # Clean up: delete key on db 3 and switch parent back
             client.custom_command(["DEL", key])
@@ -587,6 +586,7 @@ class TestScopeDisconnectionBehavior:
 
                 # Next command should fail — connection is dead
                 import time
+
                 time.sleep(0.1)  # Allow kill to propagate
 
                 try:
@@ -615,14 +615,15 @@ class TestScopeDisconnectionBehavior:
                 scope1.execute_command("CLIENT", "KILL", "ID", str(client_id_result))
 
             import time
+
             time.sleep(0.5)  # Allow cleanup to complete
 
             # Second scope: should get a fresh, working connection
             with client.scoped_connection() as scope2:
                 result = scope2.ping()
-                assert result == "PONG", (
-                    "Second scope should get a healthy connection after first was killed"
-                )
+                assert (
+                    result == "PONG"
+                ), "Second scope should get a healthy connection after first was killed"
         finally:
             client.close()
 
@@ -646,6 +647,7 @@ class TestScopeDisconnectionBehavior:
                 scope.execute_command("CLIENT", "KILL", "ID", str(client_id_result))
 
                 import time
+
                 time.sleep(0.2)
 
                 # If auto-reconnect existed, this would succeed but WATCH would be lost
@@ -688,6 +690,7 @@ class TestScopeInflightEnforcement:
             client.custom_command(["CLIENT", "PAUSE", "3000", "ALL"])
 
             import time
+
             time.sleep(0.1)
 
             # Now try a scope command — inflight limit (1) should be exhausted
@@ -698,9 +701,9 @@ class TestScopeInflightEnforcement:
                     scope.ping()
                 except Exception as e:
                     error_msg = str(e).lower()
-                    assert "inflight" in error_msg or "timeout" in error_msg, (
-                        f"Expected inflight rejection or timeout, got: {e}"
-                    )
+                    assert (
+                        "inflight" in error_msg or "timeout" in error_msg
+                    ), f"Expected inflight rejection or timeout, got: {e}"
         except Exception:
             pass  # CLIENT PAUSE may itself hit limits
         finally:

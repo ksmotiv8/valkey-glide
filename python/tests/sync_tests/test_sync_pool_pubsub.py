@@ -10,7 +10,6 @@ import threading
 import time
 import uuid
 
-
 from glide_shared.config import GlideClientConfiguration, NodeAddress
 from glide_sync import GlideClient
 from glide_sync.client_pool import ClientPool, PoolConfig

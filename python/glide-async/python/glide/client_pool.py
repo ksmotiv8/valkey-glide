@@ -20,10 +20,10 @@ from glide_shared.config import (
 )
 
 from .glide_client import (
+    _ASYNC_FFI,
     BaseClient,
     GlideClient,
     GlideClusterClient,
-    _ASYNC_FFI,
     _async_pipe_lock,
     _client_registry,
 )
@@ -45,11 +45,23 @@ class AsyncClientPool:
     """FFI-based async client pool. Same Rust pool as all other languages."""
 
     __slots__ = (
-        "_ffi", "_lib", "_client_config", "_pool_config", "_closed",
-        "_client_cache", "_conn_req_bytes", "_pool_id", "_cache_lock", "_is_cluster",
+        "_ffi",
+        "_lib",
+        "_client_config",
+        "_pool_config",
+        "_closed",
+        "_client_cache",
+        "_conn_req_bytes",
+        "_pool_id",
+        "_cache_lock",
+        "_is_cluster",
     )
 
-    def __init__(self, client_config: BaseClientConfiguration, pool_config: Optional[PoolConfig] = None):
+    def __init__(
+        self,
+        client_config: BaseClientConfiguration,
+        pool_config: Optional[PoolConfig] = None,
+    ):
         ffi_instance = _ASYNC_FFI
         self._ffi = ffi_instance.ffi
         self._lib = ffi_instance.lib
@@ -61,7 +73,9 @@ class AsyncClientPool:
         self._is_cluster = isinstance(client_config, GlideClusterClientConfiguration)
 
         # Serialize connection request
-        conn_req = client_config._create_a_protobuf_conn_request(cluster_mode=self._is_cluster)
+        conn_req = client_config._create_a_protobuf_conn_request(
+            cluster_mode=self._is_cluster
+        )
         conn_req.lib_name = "GlidePyAsync"
         self._conn_req_bytes = conn_req.SerializeToString()
 
@@ -69,6 +83,7 @@ class AsyncClientPool:
         # This ensures ASYNC_PIPE is set so pooled AsyncClient adapters
         # write responses to the pipe (not the callback path).
         import glide.glide_client as _gc
+
         with _async_pipe_lock:
             if _gc._async_pipe_read_fd < 0:
                 try:
@@ -114,7 +129,9 @@ class AsyncClientPool:
             return client_id
         if client_id == -2:
             raise RuntimeError("Invalid pool_id — pool was destroyed")
-        raise TimeoutError(f"Pool exhausted: could not acquire client within {timeout}s")
+        raise TimeoutError(
+            f"Pool exhausted: could not acquire client within {timeout}s"
+        )
 
     def release(self, client_id: int) -> None:
         """Release a borrowed client back to the pool."""
@@ -137,7 +154,9 @@ class AsyncClientPool:
 
             adapter_ptr = self._lib.glide_pool_get_client_ptr(client_id)
             if adapter_ptr == 0:
-                raise RuntimeError(f"Pool client_id {client_id} has no associated ClientAdapter")
+                raise RuntimeError(
+                    f"Pool client_id {client_id} has no associated ClientAdapter"
+                )
 
             ClientClass = GlideClusterClient if self._is_cluster else GlideClient
             client = object.__new__(ClientClass)
@@ -173,19 +192,25 @@ class AsyncClientPool:
     @property
     def idle_count(self) -> int:
         idle = self._ffi.new("uint32_t*")
-        self._lib.glide_pool_metrics(self._pool_id, idle, self._ffi.NULL, self._ffi.NULL)
+        self._lib.glide_pool_metrics(
+            self._pool_id, idle, self._ffi.NULL, self._ffi.NULL
+        )
         return idle[0]
 
     @property
     def active_count(self) -> int:
         active = self._ffi.new("uint32_t*")
-        self._lib.glide_pool_metrics(self._pool_id, self._ffi.NULL, active, self._ffi.NULL)
+        self._lib.glide_pool_metrics(
+            self._pool_id, self._ffi.NULL, active, self._ffi.NULL
+        )
         return active[0]
 
     @property
     def total_count(self) -> int:
         total = self._ffi.new("uint32_t*")
-        self._lib.glide_pool_metrics(self._pool_id, self._ffi.NULL, self._ffi.NULL, total)
+        self._lib.glide_pool_metrics(
+            self._pool_id, self._ffi.NULL, self._ffi.NULL, total
+        )
         return total[0]
 
     def close(self):

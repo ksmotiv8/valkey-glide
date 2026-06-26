@@ -1142,6 +1142,7 @@ class GlideClient(BaseClient, StandaloneCommands):
             ClosingError: If the client is closed.
         """
         import time
+
         from .isolated_scope import IsolatedScope
 
         if self._is_closed:
@@ -1203,7 +1204,9 @@ class GlideClient(BaseClient, StandaloneCommands):
         elif resp_type == 4:  # ResponseType::String
             if resp.string_value == self._ffi.NULL:
                 return None
-            return self._ffi.buffer(resp.string_value, resp.string_value_len)[:].decode("utf-8")
+            return self._ffi.buffer(resp.string_value, resp.string_value_len)[:].decode(
+                "utf-8"
+            )
         # Array (for EXEC results, LRANGE, etc.)
         elif resp_type == 5:  # ResponseType::Array
             if resp.array_value == self._ffi.NULL or resp.array_value_len == 0:

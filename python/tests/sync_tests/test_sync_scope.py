@@ -11,7 +11,6 @@ import threading
 import uuid
 
 import pytest
-
 from glide_sync import GlideClient, GlideClientConfiguration, IsolatedScope, NodeAddress
 
 
@@ -167,6 +166,7 @@ class TestIsolatedScopePoolReuse:
         scope1.close()
 
         import time
+
         time.sleep(0.1)
 
         # After releasing, we should be able to acquire again

@@ -12,7 +12,6 @@ import asyncio
 import uuid
 
 import pytest
-
 from glide import (
     AsyncClientPool,
     GlideClientConfiguration,

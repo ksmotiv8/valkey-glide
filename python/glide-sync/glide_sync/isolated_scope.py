@@ -45,9 +45,19 @@ class IsolatedScope:
             ...
     """
 
-    __slots__ = ("_scope_id", "_client_id", "_ffi", "_lib", "_released", "_response_parser", "_owner_thread")
+    __slots__ = (
+        "_scope_id",
+        "_client_id",
+        "_ffi",
+        "_lib",
+        "_released",
+        "_response_parser",
+        "_owner_thread",
+    )
 
-    def __init__(self, scope_id: int, client_id: int, ffi_instance: _GlideFFI, response_parser):
+    def __init__(
+        self, scope_id: int, client_id: int, ffi_instance: _GlideFFI, response_parser
+    ):
         self._scope_id = scope_id
         self._client_id = client_id
         self._ffi = ffi_instance.ffi

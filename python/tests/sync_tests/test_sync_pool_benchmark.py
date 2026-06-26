@@ -16,7 +16,6 @@ import sys
 import threading
 import time
 
-
 import pytest
 from glide_shared.config import GlideClientConfiguration, NodeAddress
 from glide_sync import GlideClient
