@@ -227,7 +227,10 @@ where
             };
             #[cfg(feature = "tokio-comp")]
             tokio::spawn(stream);
-            ClusterConnection { sender: tx, inner_core }
+            ClusterConnection {
+                sender: tx,
+                inner_core,
+            }
         })
     }
 
