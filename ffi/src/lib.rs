@@ -5304,6 +5304,7 @@ static POOL_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::O
 static POOL_CLIENTS: std::sync::OnceLock<dashmap::DashMap<u64, PoolClientEntry>> =
     std::sync::OnceLock::new();
 
+#[allow(dead_code)]
 struct PoolClientEntry {
     adapter_ptr: usize, // *const ClientAdapter as usize (for command dispatch)
     client: glide_core::client::Client,
@@ -5411,7 +5412,7 @@ pub unsafe extern "C" fn glide_pool_create(
             .ok()
             .and_then(|req| {
                 let db = req.database_id;
-                if db != 0 { Some(db as u32) } else { None }
+                if db != 0 { Some(db) } else { None }
             })
             .unwrap_or(0)
     };
@@ -5922,19 +5923,18 @@ pub unsafe extern "C" fn glide_scope_execute_async(
         };
 
         // Apply compression on write
-        if let Some(ref c) = client {
-            if let Some(cm) = c.compression_manager() {
-                if cm.is_enabled() {
-                    let mut full_args = vec![cmd_name.as_bytes().to_vec()];
-                    full_args.extend(args.iter().cloned());
-                    let effective_type = resolve_custom_command_type(&full_args);
-                    let _ = glide_core::compression::process_command_args_for_compression(
-                        &mut args,
-                        effective_type,
-                        Some(cm.as_ref()),
-                    );
-                }
-            }
+        if let Some(ref c) = client
+            && let Some(cm) = c.compression_manager()
+            && cm.is_enabled()
+        {
+            let mut full_args = vec![cmd_name.as_bytes().to_vec()];
+            full_args.extend(args.iter().cloned());
+            let effective_type = resolve_custom_command_type(&full_args);
+            let _ = glide_core::compression::process_command_args_for_compression(
+                &mut args,
+                effective_type,
+                Some(cm.as_ref()),
+            );
         }
 
         // OTel: create span for scope command
@@ -6193,22 +6193,21 @@ pub unsafe extern "C" fn glide_scope_execute(
         parent_id.and_then(|pid| client_registry.get(&pid).map(|e| e.value().clone()))
     };
 
-    if let Some(ref client) = parent_client {
-        if let Some(cm) = client.compression_manager() {
-            if cm.is_enabled() {
-                // Scope commands are equivalent to CustomCommand — the first "arg" is
-                // effectively the command name for compression routing purposes.
-                // Build a combined args list [cmd_name, ...args] for resolve_custom_command_type.
-                let mut full_args = vec![cmd_name.as_bytes().to_vec()];
-                full_args.extend(args.iter().cloned());
-                let effective_type = resolve_custom_command_type(&full_args);
-                let _ = glide_core::compression::process_command_args_for_compression(
-                    &mut args,
-                    effective_type,
-                    Some(cm.as_ref()),
-                );
-            }
-        }
+    if let Some(ref client) = parent_client
+        && let Some(cm) = client.compression_manager()
+        && cm.is_enabled()
+    {
+        // Scope commands are equivalent to CustomCommand — the first "arg" is
+        // effectively the command name for compression routing purposes.
+        // Build a combined args list [cmd_name, ...args] for resolve_custom_command_type.
+        let mut full_args = vec![cmd_name.as_bytes().to_vec()];
+        full_args.extend(args.iter().cloned());
+        let effective_type = resolve_custom_command_type(&full_args);
+        let _ = glide_core::compression::process_command_args_for_compression(
+            &mut args,
+            effective_type,
+            Some(cm.as_ref()),
+        );
     }
 
     let runtime = get_pool_runtime();
