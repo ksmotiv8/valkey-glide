@@ -46,6 +46,12 @@ impl Default for Cmd {
 impl Routable for Cmd {}
 
 impl Cmd {
+    pub fn new() -> Self {
+        Self {
+            command_bytes: Vec::new(),
+        }
+    }
+
     pub fn arg<T: ToRedisArgs>(&mut self, _arg: T) -> &mut Cmd {
         self
     }
@@ -66,6 +72,10 @@ impl Cmd {
 pub struct Pipeline;
 
 impl Pipeline {
+    pub fn new() -> Self {
+        Pipeline
+    }
+
     pub fn with_capacity(_capacity: usize) -> Self {
         Pipeline
     }
@@ -76,6 +86,14 @@ impl Pipeline {
 
     pub fn is_atomic(&self) -> bool {
         true
+    }
+
+    pub fn cmd(&mut self, _name: &str) -> &mut Self {
+        self
+    }
+
+    pub fn arg<T: ToRedisArgs>(&mut self, _arg: T) -> &mut Self {
+        self
     }
 
     pub fn add_command(&mut self, _cmd: Cmd) -> &mut Self {
@@ -149,6 +167,37 @@ pub struct PipelineRetryStrategy;
 impl PipelineRetryStrategy {
     pub fn new(_retry_server_error: bool, _retry_connection_error: bool) -> Self {
         PipelineRetryStrategy
+    }
+}
+
+/// Create a new command with the given name.
+pub fn cmd(name: &str) -> Cmd {
+    Cmd {
+        command_bytes: name.as_bytes().to_vec(),
+    }
+}
+
+pub mod aio {
+    /// Mock MultiplexedConnection for MIRI tests — no actual I/O.
+    #[derive(Clone)]
+    pub struct MultiplexedConnection;
+
+    impl MultiplexedConnection {
+        pub async fn send_packed_command(
+            &mut self,
+            _cmd: &super::Cmd,
+        ) -> super::RedisResult<super::Value> {
+            Ok(super::Value::Okay)
+        }
+
+        pub async fn send_packed_commands(
+            &mut self,
+            _pipe: &super::Pipeline,
+            _offset: usize,
+            _count: usize,
+        ) -> super::RedisResult<Vec<super::Value>> {
+            Ok(vec![])
+        }
     }
 }
 
