@@ -10,11 +10,13 @@ the same options and limitations apply.
 Requires a running Valkey server (standalone) on localhost:6379.
 """
 
+import threading
 import uuid
 
 import pytest
 
 from glide_sync import (
+    Batch,
     CompressionBackend,
     CompressionConfiguration,
     GlideClient,
@@ -23,12 +25,65 @@ from glide_sync import (
 )
 
 
+# ─── Client Pooling (matches conftest pattern from #6335) ─────────────────────
+
+_modifier_client_pool: dict = {}
+_modifier_pool_lock = threading.Lock()
+
+
+def _client_is_usable(client) -> bool:
+    """Check if a client's FFI handle is still valid."""
+    if client is None:
+        return False
+    return (
+        not client._is_closed
+        and client._core_client is not None
+        and client._core_client != client._ffi.NULL
+    )
+
+
+def _get_or_create_client(key: str, config: GlideClientConfiguration):
+    """Get or create a pooled client by key. Thread-safe, xdist-safe."""
+    with _modifier_pool_lock:
+        client = _modifier_client_pool.get(key)
+    if _client_is_usable(client):
+        try:
+            client.custom_command(["PING"])
+            return client
+        except Exception:
+            try:
+                client.close()
+            except Exception:
+                pass
+    client = GlideClient.create(config)
+    with _modifier_pool_lock:
+        _modifier_client_pool[key] = client
+    return client
+
+
+def _teardown_client(client, key: str):
+    """Pipelined teardown: FLUSHALL in a single round-trip batch."""
+    if not _client_is_usable(client):
+        return
+    try:
+        batch = Batch(is_atomic=False)
+        batch.custom_command(["FLUSHALL", "ASYNC"])
+        client.exec(batch, raise_on_error=True)
+    except Exception:
+        try:
+            client.close()
+        except Exception:
+            pass
+        with _modifier_pool_lock:
+            _modifier_client_pool.pop(key, None)
+
+
 # ─── Fixtures ─────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture
 def compressed_client():
-    """Create a GlideClient with ZSTD compression enabled."""
+    """Get or reuse a GlideClient with ZSTD compression enabled."""
     config = GlideClientConfiguration(
         addresses=[NodeAddress("localhost", 6379)],
         request_timeout=5000,
@@ -39,46 +94,46 @@ def compressed_client():
             min_compression_size=64,
         ),
     )
-    c = GlideClient.create(config)
-    yield c
-    c.close()
+    client = _get_or_create_client("compressed", config)
+    yield client
+    _teardown_client(client, "compressed")
 
 
 @pytest.fixture
 def raw_client():
-    """Create a GlideClient WITHOUT compression (for verification)."""
+    """Get or reuse a GlideClient WITHOUT compression (for verification)."""
     config = GlideClientConfiguration(
         addresses=[NodeAddress("localhost", 6379)],
         request_timeout=5000,
     )
-    c = GlideClient.create(config)
-    yield c
-    c.close()
+    client = _get_or_create_client("raw", config)
+    yield client
+    _teardown_client(client, "raw")
 
 
 @pytest.fixture
 def short_timeout_client():
-    """Create a GlideClient with a short request timeout."""
+    """Get or reuse a GlideClient with a short request timeout."""
     config = GlideClientConfiguration(
         addresses=[NodeAddress("localhost", 6379)],
         request_timeout=100,  # 100ms
     )
-    c = GlideClient.create(config)
-    yield c
-    c.close()
+    client = _get_or_create_client("short_timeout", config)
+    yield client
+    _teardown_client(client, "short_timeout")
 
 
 @pytest.fixture
 def inflight_limited_client():
-    """Create a GlideClient with explicit inflight limit."""
+    """Get or reuse a GlideClient with explicit inflight limit."""
     config = GlideClientConfiguration(
         addresses=[NodeAddress("localhost", 6379)],
         request_timeout=5000,
         inflight_requests_limit=500,
     )
-    c = GlideClient.create(config)
-    yield c
-    c.close()
+    client = _get_or_create_client("inflight_limited", config)
+    yield client
+    _teardown_client(client, "inflight_limited")
 
 
 # ─── Compression Tests ────────────────────────────────────────────────────────
@@ -137,7 +192,7 @@ class TestScopeCompression:
                 min_compression_size=256,  # Only compress >= 256 bytes
             ),
         )
-        client = GlideClient.create(config)
+        client = _get_or_create_client("high_threshold", config)
 
         key = f"scope-small-{uuid.uuid4().hex[:8]}"
         small_value = "hello"  # 5 bytes — well below threshold
@@ -154,7 +209,6 @@ class TestScopeCompression:
 
         # Cleanup
         client.delete([key])
-        client.close()
 
     def test_scope_roundtrip_with_compression(self, compressed_client):
         """Full round-trip: scope SET → scope GET on same scope."""
@@ -223,8 +277,8 @@ class TestScopeRequestTimeout:
             addresses=[NodeAddress("localhost", 6379)],
             request_timeout=200,
         )
-        client_a = GlideClient.create(config_a)
-        client_b = GlideClient.create(config_b)
+        client_a = _get_or_create_client("timeout_5000", config_a)
+        client_b = _get_or_create_client("timeout_200", config_b)
 
         key = f"dual-timeout-{uuid.uuid4().hex[:8]}"
 
@@ -238,8 +292,6 @@ class TestScopeRequestTimeout:
 
         # Cleanup
         client_a.delete([key])
-        client_a.close()
-        client_b.close()
 
 
 # ─── Inflight Request Limit Tests ────────────────────────────────────────────
@@ -292,7 +344,7 @@ class TestScopeCombinedModifiers:
                 min_compression_size=64,
             ),
         )
-        client = GlideClient.create(config)
+        client = _get_or_create_client("all_modifiers", config)
 
         key = f"combined-{uuid.uuid4().hex[:8]}"
         large_value = "TestData_" * 100  # ~900 bytes
@@ -312,7 +364,7 @@ class TestScopeCombinedModifiers:
             addresses=[NodeAddress("localhost", 6379)],
             request_timeout=5000,
         )
-        raw_client = GlideClient.create(raw_config)
+        raw_client = _get_or_create_client("raw_verify", raw_config)
         raw_value = raw_client.get(key)
         assert raw_value != large_value.encode(), (
             "Data should be stored compressed in Valkey"
@@ -320,5 +372,3 @@ class TestScopeCombinedModifiers:
 
         # Cleanup
         client.delete([key])
-        raw_client.close()
-        client.close()
