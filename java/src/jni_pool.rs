@@ -42,7 +42,7 @@ pub extern "system" fn Java_glide_ffi_resolvers_GlidePoolResolver_glidePoolCreat
             use protobuf::Message as _;
             glide_core::connection_request::ConnectionRequest::parse_from_bytes(&bytes)
                 .ok()
-                .map(|req| req.database_id as u32)
+                .map(|req| req.database_id)
                 .unwrap_or(0)
         },
     };
@@ -182,6 +182,27 @@ pub extern "system" fn Java_glide_ffi_resolvers_GlidePoolResolver_glidePoolRelea
     let runtime = get_runtime();
     runtime.spawn(async move {
         let mut entry = entry;
+        let pool_for_guard = pool_clone.clone();
+
+        // Safety: if this task is cancelled, decrement total_count to prevent slot leak
+        struct LeakGuard {
+            pool: Option<std::sync::Arc<tokio::sync::Mutex<glide_core::pool::ClientPool>>>,
+        }
+        impl Drop for LeakGuard {
+            fn drop(&mut self) {
+                if let Some(pool_arc) = self.pool.take() {
+                    if let Ok(mut pool) = pool_arc.try_lock() {
+                        pool.discard_client();
+                    } else {
+                        pool_arc.blocking_lock().discard_client();
+                    }
+                }
+            }
+        }
+        let mut guard = LeakGuard {
+            pool: Some(pool_for_guard),
+        };
+
         let timeout_duration = {
             let pool = pool_clone.lock().await;
             pool.config.request_timeout * 2
@@ -191,6 +212,9 @@ pub extern "system" fn Java_glide_ffi_resolvers_GlidePoolResolver_glidePoolRelea
             entry.client.reset_connection_state(configured_db),
         )
         .await;
+
+        // Disarm the guard — we handle the outcome explicitly
+        guard.pool = None;
 
         let mut pool = pool_clone.lock().await;
         match reset_result {
