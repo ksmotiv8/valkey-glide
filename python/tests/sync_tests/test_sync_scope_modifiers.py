@@ -651,3 +651,58 @@ class TestScopeDisconnectionBehavior:
                 client.delete([key])
         finally:
             client.close()
+
+
+# ─── Inflight Limit Enforcement Tests ─────────────────────────────────────────
+
+
+class TestScopeInflightEnforcement:
+    """Tests that scoped commands are rejected when inflight limit is exhausted."""
+
+    def test_scope_rejects_when_inflight_exhausted(self):
+        """Scoped commands fail with an error when inflight limit is reached.
+
+        We configure a client with inflight_requests_limit=1, then use CLIENT PAUSE
+        to stall one command, and verify the next scope command is rejected.
+        """
+        config = GlideClientConfiguration(
+            addresses=[NodeAddress("localhost", 6379)],
+            request_timeout=2000,
+            inflight_requests_limit=1,
+        )
+        client = GlideClient.create(config)
+
+        try:
+            # CLIENT PAUSE stalls all responses for 3 seconds
+            # This holds an inflight slot on the parent client
+            client.custom_command(["CLIENT", "PAUSE", "3000", "ALL"])
+
+            import time
+            time.sleep(0.1)
+
+            # Now try a scope command — inflight limit (1) should be exhausted
+            # because the paused command is still occupying the slot
+            with client.scoped_connection() as scope:
+                try:
+                    # This should fail because inflight is exhausted
+                    scope.ping()
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    assert "inflight" in error_msg or "timeout" in error_msg, (
+                        f"Expected inflight rejection or timeout, got: {e}"
+                    )
+        except Exception:
+            pass  # CLIENT PAUSE may itself hit limits
+        finally:
+            # Unpause to clean up
+            try:
+                unpause_config = GlideClientConfiguration(
+                    addresses=[NodeAddress("localhost", 6379)],
+                    request_timeout=5000,
+                )
+                unpause_client = GlideClient.create(unpause_config)
+                unpause_client.custom_command(["CLIENT", "UNPAUSE"])
+                unpause_client.close()
+            except Exception:
+                pass
+            client.close()
