@@ -11,6 +11,8 @@
 
 ### Changes
 
+* Core, Java, Python, Go: Add client-instance pooling and isolated execution scopes. Pools eliminate multiplexer contention under high concurrency; scopes provide dedicated connections for WATCH/MULTI/EXEC and CLIENT TRACKING. All languages share a unified Rust implementation via `send_scope_command()` and `release_client_async()`. Pool release resets state (DISCARD + SELECT). Scopes inherit parent's current database, credentials, and compression. Circuit breaker and inflight limits enforced. ([#6338](https://github.com/valkey-io/valkey-glide/pull/6338))
+* Core, Java, Python, Go: Add Python 3.13t/3.14t free-threaded support to test matrix and PyPI wheels. ([#5445](https://github.com/valkey-io/valkey-glide/issues/5445))
 * Java: implement MONITOR command ([#6187](https://github.com/valkey-io/valkey-glide/pull/6187))
 * Node: Add GlideMonitorClient for MONITOR command ([#6212](https://github.com/valkey-io/valkey-glide/pull/6212))
 * Python: implement MONITOR command for sync and async clients ([#6132](https://github.com/valkey-io/valkey-glide/pull/6132))
