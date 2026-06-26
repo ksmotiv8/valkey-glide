@@ -219,17 +219,17 @@ pub async fn execute_scope_command(
 pub async fn send_scope_command(
     scope_id: u64,
     cmd_name: &str,
-    args: &mut Vec<Vec<u8>>,
+    args: &mut [Vec<u8>],
     client: Option<&Client>,
 ) -> RedisResult<Value> {
     // 1. Circuit breaker check
-    if let Some(c) = client {
-        if !c.is_circuit_breaker_healthy() {
-            return Err(RedisError::from((
-                redis::ErrorKind::CircuitBreakerOpen,
-                "Client circuit breaker is open - core unhealthy",
-            )));
-        }
+    if let Some(c) = client
+        && !c.is_circuit_breaker_healthy()
+    {
+        return Err(RedisError::from((
+            redis::ErrorKind::CircuitBreakerOpen,
+            "Client circuit breaker is open - core unhealthy",
+        )));
     }
 
     // 2. Inflight request reservation (reject if exhausted)

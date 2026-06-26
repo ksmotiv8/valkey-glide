@@ -204,7 +204,7 @@ func (p *ClientPool) GetClient(clientID int64) (*PooledClient, error) {
 	}
 
 	adapterPtr := C.glide_pool_get_client_ptr(C.uint64_t(clientID))
-	if adapterPtr == 0 {
+	if adapterPtr == nil {
 		return nil, errors.New("client_id has no associated client")
 	}
 
@@ -212,7 +212,7 @@ func (p *ClientPool) GetClient(clientID int64) (*PooledClient, error) {
 	// The adapter is an AsyncClient type — commands via C.command() fire callbacks.
 	client := &Client{
 		baseClient: baseClient{
-			coreClient: unsafe.Pointer(uintptr(adapterPtr)),
+			coreClient: unsafe.Pointer(adapterPtr),
 			pending:    make(map[unsafe.Pointer]struct{}),
 			mu:         &sync.Mutex{},
 		},
@@ -220,7 +220,7 @@ func (p *ClientPool) GetClient(clientID int64) (*PooledClient, error) {
 	client.setMessageHandler(NewMessageHandler(nil, nil))
 
 	// Register in client registry for pubsub (if needed)
-	registerClient(&client.baseClient, uintptr(adapterPtr))
+	registerClient(&client.baseClient, uintptr(unsafe.Pointer(adapterPtr)))
 
 	pooled := &PooledClient{
 		Client:   client,

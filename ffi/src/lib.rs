@@ -5728,11 +5728,11 @@ pub extern "C" fn glide_pool_destroy(pool_id: u64) -> i32 {
 /// Get the ClientAdapter pointer for a borrowed client_id.
 /// Language bindings pass this to `command()` for dispatch.
 #[unsafe(no_mangle)]
-pub extern "C" fn glide_pool_get_client_ptr(client_id: u64) -> usize {
+pub extern "C" fn glide_pool_get_client_ptr(client_id: u64) -> *const c_void {
     get_pool_clients()
         .get(&client_id)
-        .map(|e| e.adapter_ptr)
-        .unwrap_or(0)
+        .map(|e| e.adapter_ptr as *const c_void)
+        .unwrap_or(std::ptr::null())
 }
 
 /// Set the pipe_client_id on a pooled client adapter.
