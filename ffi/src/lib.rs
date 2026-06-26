@@ -2299,6 +2299,11 @@ fn apply_json_options(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn close_client(client_adapter_ptr: *const c_void) {
     assert!(!client_adapter_ptr.is_null());
+
+    // Clean up scope pool for this client (if any)
+    let client_id = client_adapter_ptr as usize as u64;
+    glide_core::pool::get_client_scope_pools().remove(&client_id);
+
     // This will bring the strong count down to 0 once all client requests are done.
     unsafe { Arc::decrement_strong_count(client_adapter_ptr as *const ClientAdapter) };
 }
@@ -5702,8 +5707,20 @@ pub extern "C" fn glide_pool_destroy(pool_id: u64) -> i32 {
         None => return -1,
     };
     if let Ok(mut pool) = pool_arc.try_lock() {
+        // Clean up POOL_CLIENTS entries for all clients owned by this pool
+        let client_ids: Vec<u64> = pool
+            .idle
+            .iter()
+            .map(|e| e.client_id)
+            .chain(pool.in_use.iter().map(|e| *e.key()))
+            .collect();
+        for cid in client_ids {
+            get_pool_clients().remove(&cid);
+        }
         pool.destroy();
     }
+    // Clean up stored ClientType for this pool
+    get_pool_client_types().remove(&pool_id);
     0
 }
 

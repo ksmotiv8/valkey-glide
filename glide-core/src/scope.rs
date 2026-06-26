@@ -329,7 +329,7 @@ pub fn try_acquire_scope(
             if result >= 0 {
                 let _ = telemetrylib::GlideOpenTelemetry::record_scope_acquire();
             }
-            if result < 0 && pool.total_count.load(Ordering::Acquire) <= pool.config.max_total {
+            if result < 0 && pool.total_count.load(Ordering::Acquire) < pool.config.max_total {
                 // Spawn background connection creation
                 let pool_clone = scope_pool.clone();
                 let conn_bytes = pool.connection_request_bytes.clone();
