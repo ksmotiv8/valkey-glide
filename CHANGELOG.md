@@ -5,11 +5,18 @@
 ### Fixes
 
 * Core/FFI: Fix heap corruption in `convert_vec_to_pointer` where `shrink_to_fit()` (a non-binding hint) was followed by `Vec::from_raw_parts` with `capacity = len`. When the allocator kept extra capacity, deallocation passed the wrong size, corrupting heap metadata and causing delayed SIGABRT crashes after many pubsub messages or response frees. ([#5637](https://github.com/valkey-io/valkey-glide/pull/5637))
+* Python: Fix `get(key, buffer=...)` under-reporting capacity for non-byte-format memoryviews. The sync client passed `len(response_buffer)` (element count) to the FFI instead of `response_buffer.nbytes`, so a memoryview with `itemsize > 1` (e.g. `array("I", ...)`) was treated as `itemsize`× smaller than its real capacity, spuriously failing valid GETs with "Value size exceeds buffer capacity". Byte-format (`"B"`) buffers were unaffected. ([#6310](https://github.com/valkey-io/valkey-glide/issues/6310))
 * Core: Honor `AWS_ENDPOINT_URL_STS` in the IAM credentials-provider loader so ElastiCache/MemoryDB IAM auth works in AWS partitions that do not publish a separate FIPS STS hostname (e.g. `us-gov-west-1`). Previously, setting `AWS_USE_FIPS_ENDPOINT=true` made the SDK construct a non-existent `sts-fips.<region>.amazonaws.com`, causing credential acquisition to hang. Matches `boto3` behavior. ([#5967](https://github.com/valkey-io/valkey-glide/issues/5967))
 * Core: Make the pipeline send-timeout liveness-aware so sustained backpressure on a live-but-slow connection waits for channel capacity instead of failing commands with `FatalSendError`, while a genuinely dead connection still fails fast ([#5446](https://github.com/valkey-io/valkey-glide/issues/5446))
 
 ### Changes
 
+* Java: implement MONITOR command ([#6187](https://github.com/valkey-io/valkey-glide/pull/6187))
+* Node: Add GlideMonitorClient for MONITOR command ([#6212](https://github.com/valkey-io/valkey-glide/pull/6212))
+* Python: implement MONITOR command for sync and async clients ([#6132](https://github.com/valkey-io/valkey-glide/pull/6132))
+* Go: Add MonitorClient for MONITOR command ([#6211](https://github.com/valkey-io/valkey-glide/pull/6211))
+* Java: Add `MIGRATE KEYS` (multi-key) variant ([#6063](https://github.com/valkey-io/valkey-glide/pull/6063))
+* Node: Add `MIGRATE KEYS` (multi-key) variant ([#6064](https://github.com/valkey-io/valkey-glide/pull/6064))
 * Core, Java, Python, Node, Go: Add `LATENCY HISTORY`, `LATENCY LATEST`, and `LATENCY RESET` command support ([#6206](https://github.com/valkey-io/valkey-glide/issues/6206))
 * Node, Python, Go: Add `FAILOVER` and `REPLICAOF` command support ([#6222](https://github.com/valkey-io/valkey-glide/pull/6222))
 * Python Async: Replace UDS+protobuf transport with FFI+pipe architecture. Commands go directly through CFFI to Rust; responses return via anonymous pipe with Rust-native parsing. Adds trio/anyio support, address resolver, cache metrics. +19-21% throughput for simple commands, +11-16% for collections vs v2.4.1. ([#5637](https://github.com/valkey-io/valkey-glide/pull/5637))
@@ -24,6 +31,7 @@
 * Core/FFI: Add `MonitorClient` for the MONITOR command ([#5977](https://github.com/valkey-io/valkey-glide/pull/5977))
 * Node: Add RESET command support ([#5945](https://github.com/valkey-io/valkey-glide/pull/5945))
 * Python: Add RESET command support ([#5944](https://github.com/valkey-io/valkey-glide/pull/5944))
+* Python: Add `MIGRATE KEYS` (multi-key) variant ([#6066](https://github.com/valkey-io/valkey-glide/pull/6066))
 * Python: Add `MIGRATE` command support ([#5933](https://github.com/valkey-io/valkey-glide/pull/5933))
 * Core: Phase 2 client-side caching ([#5962](https://github.com/valkey-io/valkey-glide/pull/5962))
 * Java: Add `clientTrackingInfo` command and `serverAssisted` flag for Phase 2 client-side caching ([#5965](https://github.com/valkey-io/valkey-glide/pull/5965))

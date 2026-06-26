@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import array
 import math
 import os
 import threading
@@ -564,6 +565,33 @@ class TestCommands:
         n = glide_sync_client.get(key, buffer=memoryview(buf))
         assert n == b"100"
         assert buf[:100] == data
+
+    @pytest.mark.parametrize("cluster_mode", [True, False])
+    @pytest.mark.parametrize("protocol", [ProtocolVersion.RESP2, ProtocolVersion.RESP3])
+    def test_sync_get_into_buffer_non_byte_format(
+        self, glide_sync_client: TGlideClient
+    ):
+        """Regression: capacity is byte-based, not element-based.
+
+        A memoryview over an ``itemsize > 1`` buffer has ``len()`` (element
+        count) smaller than its ``nbytes`` (byte capacity). The value below is
+        4096 bytes and the buffer is 1024 ``uint32`` elements == 4096 bytes, so
+        it fits exactly. Before the fix, capacity was computed with ``len()``
+        (1024) and the GET was spuriously rejected with "exceeds buffer
+        capacity"; with ``nbytes`` (4096) it succeeds.
+        """
+        key = get_random_string(10)
+        data = os.urandom(4096)
+        assert glide_sync_client.set(key, data) == OK
+
+        arr = array.array("I", [0] * 1024)  # itemsize=4, len()=1024, nbytes=4096
+        buf = memoryview(arr)
+        assert len(buf) < len(data)  # element count under-reports capacity
+        assert buf.nbytes == len(data)
+
+        n = glide_sync_client.get(key, buffer=buf)
+        assert n == b"4096"
+        assert buf.cast("B")[:4096] == data
 
     @pytest.mark.parametrize("cluster_mode", [True, False])
     @pytest.mark.parametrize("protocol", [ProtocolVersion.RESP2, ProtocolVersion.RESP3])
@@ -9582,6 +9610,85 @@ class TestCommands:
 
         with pytest.raises(ValueError):
             MigrateOptions(username="user").to_args()
+
+        # Multi-key: only available on standalone clients
+        if not isinstance(glide_sync_client, GlideClusterClient):
+            hash_tag = get_random_string(5)
+            key2 = f"{hash_tag}a"
+            key3 = f"{hash_tag}b"
+            glide_sync_client.set(key2, "value2")
+            glide_sync_client.set(key3, "value3")
+            with pytest.raises(RequestError):
+                glide_sync_client.migrate("invalid-host", 6379, [key2, key3], 0, 5000)
+
+            # Multi-key: empty keys list raises ValueError
+            with pytest.raises(ValueError):
+                glide_sync_client.migrate("invalid-host", 6379, [], 0, 5000)
+
+            # Multi-key NOKEY: non-existent keys return NOKEY immediately (no connection made).
+            non_existent1 = get_random_string(5)
+            non_existent2 = get_random_string(5)
+            result = glide_sync_client.migrate(
+                "invalid-host",
+                6379,
+                [non_existent1, non_existent2],
+                0,
+                5000,
+            )
+            assert result == b"NOKEY"
+
+    @pytest.fixture(scope="class")
+    def second_server(self, request):
+        from tests.utils.cluster import ValkeyCluster
+
+        tls = request.config.getoption("--tls")
+        cluster = ValkeyCluster(
+            tls=tls, cluster_mode=False, shard_count=1, replica_count=0
+        )
+        yield cluster
+        del cluster
+
+    @pytest.mark.parametrize("cluster_mode", [False])
+    @pytest.mark.parametrize("protocol", [ProtocolVersion.RESP2, ProtocolVersion.RESP3])
+    def test_sync_migrate_success(
+        self, glide_sync_client: TGlideClient, second_server, request
+    ):
+        dest_addr = second_server.nodes_addr[0]
+        dest_host = dest_addr.host
+        dest_port = dest_addr.port
+        dest_client = create_sync_client(
+            request, cluster_mode=False, addresses=[NodeAddress(dest_host, dest_port)]
+        )
+        try:
+            # Single-key migrate
+            key = get_random_string(10)
+            value = get_random_string(5)
+            glide_sync_client.set(key, value)
+            result = glide_sync_client.migrate(dest_host, dest_port, key, 0, 5000)
+            assert result == OK or result == b"OK"
+            assert glide_sync_client.exists([key]) == 0
+            assert dest_client.get(key) == value.encode()
+
+            # Multi-key migrate
+            key1 = get_random_string(10)
+            key2 = get_random_string(10)
+            val1 = get_random_string(5)
+            val2 = get_random_string(5)
+            glide_sync_client.set(key1, val1)
+            glide_sync_client.set(key2, val2)
+            result = glide_sync_client.migrate(
+                dest_host,
+                dest_port,
+                [key1, key2],
+                0,
+                5000,
+            )
+            assert result == OK or result == b"OK"
+            assert glide_sync_client.exists([key1, key2]) == 0
+            assert dest_client.get(key1) == val1.encode()
+            assert dest_client.get(key2) == val2.encode()
+        finally:
+            dest_client.close()
 
     @pytest.mark.parametrize("cluster_mode", [True, False])
     @pytest.mark.parametrize("protocol", [ProtocolVersion.RESP2, ProtocolVersion.RESP3])
