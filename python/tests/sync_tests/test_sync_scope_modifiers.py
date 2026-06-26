@@ -372,3 +372,181 @@ class TestScopeCombinedModifiers:
 
         # Cleanup
         client.delete([key])
+
+
+# ─── Database State Tests ─────────────────────────────────────────────────────
+
+
+class TestDatabaseStateInheritance:
+    """Tests that database selection is correctly handled across pool and scope."""
+
+    def test_scope_inherits_configured_database(self):
+        """Scope connections use the database from the client's config."""
+        # Create client configured for database 2
+        config = GlideClientConfiguration(
+            addresses=[NodeAddress("localhost", 6379)],
+            request_timeout=5000,
+            database_id=2,
+        )
+        client = GlideClient.create(config)
+
+        key = f"db2-scope-{uuid.uuid4().hex[:8]}"
+        try:
+            # Write via scope on database 2
+            with client.scoped_connection() as scope:
+                scope.set(key, "on-db2")
+                val = scope.get(key)
+                assert val == "on-db2"
+
+            # Parent client (also on db 2) should see the key
+            result = client.get(key)
+            assert result == b"on-db2"
+
+            # A client on database 0 should NOT see the key
+            config_db0 = GlideClientConfiguration(
+                addresses=[NodeAddress("localhost", 6379)],
+                request_timeout=5000,
+                database_id=0,
+            )
+            client_db0 = GlideClient.create(config_db0)
+            result_db0 = client_db0.get(key)
+            assert result_db0 is None, (
+                "Key written on db2 via scope should not be visible on db0"
+            )
+            client_db0.close()
+        finally:
+            client.custom_command(["DEL", key])
+            client.close()
+
+    def test_scope_uses_config_db_not_runtime_db(self):
+        """If parent calls SELECT at runtime, scope still uses the config database.
+
+        Scoped connections are created from the static connection request config,
+        not from the parent's current runtime state. This is deterministic behavior.
+        """
+        # Create client configured for database 0
+        config = GlideClientConfiguration(
+            addresses=[NodeAddress("localhost", 6379)],
+            request_timeout=5000,
+            database_id=0,
+        )
+        client = GlideClient.create(config)
+
+        key = f"runtime-db-{uuid.uuid4().hex[:8]}"
+        try:
+            # Write a key on db 3 via the parent client (runtime SELECT)
+            client.custom_command(["SELECT", "3"])
+            client.set(key, "on-db3")
+
+            # Scope uses config database (0), so it should NOT see the key
+            with client.scoped_connection() as scope:
+                result = scope.get(key)
+                # Scope is on db 0 (from config), key is on db 3
+                assert result is None, (
+                    "Scope should use configured database (0), not parent's runtime db (3)"
+                )
+
+            # Clean up: switch parent back and delete
+            client.custom_command(["SELECT", "3"])
+            client.custom_command(["DEL", key])
+            client.custom_command(["SELECT", "0"])
+        finally:
+            client.close()
+
+    def test_pool_resets_database_after_borrow(self):
+        """After a borrower changes database, the pool resets it on release.
+
+        Next borrower should get a connection on the configured database.
+        """
+        import time
+
+        from glide_sync import ClientPool, PoolConfig
+
+        config = GlideClientConfiguration(
+            addresses=[NodeAddress("localhost", 6379)],
+            request_timeout=5000,
+            database_id=0,
+        )
+        pool_config = PoolConfig(
+            max_size=1,
+            min_idle=1,
+            acquire_timeout_ms=10000,
+            client_config=config,
+        )
+        pool = ClientPool.create(pool_config)
+        time.sleep(2)  # Wait for min_idle warmup
+
+        key = f"pool-db-reset-{uuid.uuid4().hex[:8]}"
+
+        try:
+            # First borrower: switch to db 5 and write a key there
+            with pool.acquire() as client1:
+                client1.custom_command(["SELECT", "5"])
+                client1.set(key, "on-db5")
+            # client1 is released — pool should reset back to db 0
+
+            time.sleep(0.5)  # Allow async reset to complete
+
+            # Second borrower: should be on db 0 (reset happened)
+            with pool.acquire() as client2:
+                # This key should NOT be visible (we're on db 0, key is on db 5)
+                result = client2.get(key)
+                assert result is None, (
+                    "Pool should reset database to configured value after release. "
+                    "Second borrower should be on db 0, not db 5."
+                )
+        finally:
+            # Clean up key on db 5
+            cleanup_config = GlideClientConfiguration(
+                addresses=[NodeAddress("localhost", 6379)],
+                request_timeout=5000,
+                database_id=5,
+            )
+            cleanup = GlideClient.create(cleanup_config)
+            cleanup.custom_command(["DEL", key])
+            cleanup.close()
+            pool.close()
+
+    def test_scope_release_resets_database(self):
+        """After scope user calls SELECT, release resets to configured database.
+
+        Next scope borrow from the same pool should be on the configured database.
+        """
+        import time
+
+        config = GlideClientConfiguration(
+            addresses=[NodeAddress("localhost", 6379)],
+            request_timeout=5000,
+            database_id=0,
+        )
+        client = GlideClient.create(config)
+
+        key = f"scope-db-reset-{uuid.uuid4().hex[:8]}"
+
+        try:
+            # First scope: SELECT to db 4 and write
+            with client.scoped_connection() as scope:
+                scope.execute_command("SELECT", "4")
+                scope.set(key, "on-db4")
+            # Scope released — cleanup should reset to db 0
+
+            time.sleep(0.3)  # Allow async cleanup to complete
+
+            # Second scope: should be on db 0 (not db 4)
+            with client.scoped_connection() as scope2:
+                result = scope2.get(key)
+                assert result is None, (
+                    "Scope release should reset database. Second scope should be on "
+                    "configured db (0), not the previous scope's runtime db (4)."
+                )
+        finally:
+            # Clean up key on db 4
+            cleanup_config = GlideClientConfiguration(
+                addresses=[NodeAddress("localhost", 6379)],
+                request_timeout=5000,
+                database_id=4,
+            )
+            cleanup = GlideClient.create(cleanup_config)
+            cleanup.custom_command(["DEL", key])
+            cleanup.close()
+            client.close()
