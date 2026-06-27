@@ -1504,7 +1504,10 @@ pub extern "system" fn Java_glide_internal_GlideNativeBridge_createClient(
                 let handle_table = get_handle_table();
 
                 // Store in handle table
-                handle_table.insert(safe_handle, client);
+                handle_table.insert(safe_handle, client.clone());
+
+                // Register in scope client registry for scope command execution
+                glide_core::scope::register_client(safe_handle, client);
 
                 // Always spawn push forwarder to deliver pushes to Java
                 let jvm_arc = jni_client::JVM.get().cloned();
