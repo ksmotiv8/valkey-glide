@@ -252,8 +252,6 @@ pub async fn send_scope_command(
         && let Some(cm) = c.compression_manager()
         && cm.is_enabled()
     {
-        let mut full_args = vec![cmd_name.as_bytes().to_vec()];
-        full_args.extend(args.iter().cloned());
         // Resolve command type for compression routing
         let effective_type = crate::request_type::RequestType::from_command_name(cmd_name)
             .unwrap_or(crate::request_type::RequestType::CustomCommand);

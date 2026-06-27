@@ -86,7 +86,6 @@ pub extern "system" fn Java_glide_ffi_resolvers_GlideScopeResolver_glideScopeExe
 
             parent_id.and_then(|pid| client_registry.get(&pid).map(|e| e.value().clone()))
         };
-        };
 
         let mut args = args;
         let result =
