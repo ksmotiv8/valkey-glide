@@ -20,17 +20,9 @@ from glide import (
     NodeAddress,
 )
 
+from tests.utils.utils import get_standalone_address as _get_standalone_address
+
 pytestmark = pytest.mark.asyncio
-
-
-def _get_standalone_address():
-    """Get standalone server address from conftest (CI) or fallback to localhost."""
-    try:
-        cluster = pytest.standalone_cluster  # type: ignore[attr-defined]
-        addr = cluster.nodes_addr[0]
-        return NodeAddress(addr.host, addr.port)
-    except (AttributeError, IndexError):
-        return NodeAddress("localhost", 6379)
 
 
 @pytest_asyncio.fixture

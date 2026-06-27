@@ -29,24 +29,8 @@ from glide_sync import (
 )
 from packaging import version
 
-
-def _get_standalone_address():
-    """Get the standalone server address from conftest (CI) or fallback to localhost."""
-    try:
-        cluster = pytest.standalone_cluster  # type: ignore[attr-defined]
-        addr = cluster.nodes_addr[0]
-        return NodeAddress(addr.host, addr.port)
-    except (AttributeError, IndexError):
-        return NodeAddress("localhost", 6379)
-
-
-def _get_cluster_addresses():
-    """Get the cluster server addresses from conftest (CI) or fallback to localhost:7000."""
-    try:
-        cluster = pytest.valkey_cluster  # type: ignore[attr-defined]
-        return [NodeAddress(addr.host, addr.port) for addr in cluster.nodes_addr]
-    except (AttributeError, IndexError):
-        return [NodeAddress("localhost", 7000)]
+from tests.utils.utils import get_cluster_addresses as _get_cluster_addresses
+from tests.utils.utils import get_standalone_address as _get_standalone_address
 
 
 def _get_server_version(client) -> str:
@@ -945,9 +929,7 @@ class TestClusterScopeCompression:
         # Cleanup
         cluster_compressed_client.delete([key])
 
-    def test_cluster_scope_small_values_not_compressed(
-        self, cluster_raw_client
-    ):
+    def test_cluster_scope_small_values_not_compressed(self, cluster_raw_client):
         """Values below minCompressionSize are stored uncompressed in cluster mode."""
         _skip_cluster_if_unavailable()
         config = GlideClusterClientConfiguration(
@@ -1002,7 +984,9 @@ class TestClusterDatabaseStateInheritance:
         ver = _get_server_version(client)
         if version.parse(ver) < version.parse("9.0.0"):
             client.close()
-            pytest.skip(f"Requires Valkey 9+ for cluster database selection (got {ver})")
+            pytest.skip(
+                f"Requires Valkey 9+ for cluster database selection (got {ver})"
+            )
         yield client
         client.close()
 
