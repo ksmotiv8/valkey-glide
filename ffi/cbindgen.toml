@@ -3,9 +3,12 @@ language = "C"
 
 header = "/* Copyright Valkey GLIDE Project Contributors - SPDX Identifier: Apache-2.0 */"
 
-[defines]
-"feature = pool-support" = "GLIDE_POOL_SUPPORT"
-
 [parse]
 parse_deps = true
-include = ["glide-core"] 
+include = ["glide-core"]
+
+# pool-support feature is always enabled in real builds.
+# cbindgen processes the crate with default features, so pool_ffi symbols
+# are always visible. No [defines] mapping needed.
+[parse.expand]
+default_features = true
