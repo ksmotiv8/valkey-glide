@@ -59,7 +59,7 @@ pub extern "system" fn Java_glide_ffi_resolvers_GlideScopeResolver_glideScopeExe
         None => return -2,
     };
 
-    // Verify scope exists before spawning
+    // Verify scope exists
     let registry = glide_core::pool::get_scope_registry();
     if registry.get(&(scope_id as u64)).is_none() {
         return -1;
@@ -70,7 +70,6 @@ pub extern "system" fn Java_glide_ffi_resolvers_GlideScopeResolver_glideScopeExe
     let sid = scope_id as u64;
 
     runtime.spawn(async move {
-        // Get the parent client for timeout/decompression/IAM/CB/inflight
         let client_registry = glide_core::scope::get_client_registry();
         let client = {
             let pools = glide_core::pool::get_client_scope_pools();
@@ -89,7 +88,8 @@ pub extern "system" fn Java_glide_ffi_resolvers_GlideScopeResolver_glideScopeExe
 
         let mut args = args;
         let result =
-            glide_core::scope::send_scope_command(sid, &cmd_name, &mut args, client.as_ref()).await;
+            glide_core::scope::send_scope_command(sid, &cmd_name, &mut args, client.as_ref())
+                .await;
 
         complete_callback(jvm, callback_id, result, false);
     });

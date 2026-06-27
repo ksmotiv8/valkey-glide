@@ -188,6 +188,12 @@ pub async fn execute_scope_command(
         cmd.arg(arg.as_slice());
     }
 
+    // DEBUG: verify compression state
+    if cmd_name == "SET" && args.len() > 1 && args[1].len() < 100 {
+        eprintln!("[EXEC_SCOPE DEBUG] SET with args[1] len={}, first_bytes={:?}",
+            args[1].len(), &args[1][..std::cmp::min(5, args[1].len())]);
+    }
+
     // Execute via Client (gets timeout, decompression, IAM refresh) or raw fallback
     match client {
         Some(c) => {
