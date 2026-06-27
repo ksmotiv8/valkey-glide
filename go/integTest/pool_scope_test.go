@@ -36,11 +36,22 @@ func standaloneConfig() *config.ClientConfiguration {
 		WithRequestTimeout(5000 * time.Millisecond)
 }
 
+// skipIfNoStandaloneEndpoints skips the test if no --standalone-endpoints flag
+// was provided. This prevents pool/scope tests from running in specialized
+// CI targets (long-timeout-test, pubsub-test) that don't provision a standalone server.
+func skipIfNoStandaloneEndpoints(t *testing.T) {
+	t.Helper()
+	if standaloneHosts == nil || *standaloneHosts == "" {
+		t.Skip("No --standalone-endpoints provided; skipping pool/scope test")
+	}
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Feature 1: ClientPool tests
 // ═══════════════════════════════════════════════════════════════════════════════
 
 func TestPoolCreateAndMetrics(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
 		MaxSize:        3,
 		MinIdle:        2,
@@ -57,6 +68,7 @@ func TestPoolCreateAndMetrics(t *testing.T) {
 }
 
 func TestPoolAcquireAndCommands(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
 		MaxSize:        3,
 		MinIdle:        1,
@@ -91,6 +103,7 @@ func TestPoolAcquireAndCommands(t *testing.T) {
 }
 
 func TestPoolReuse(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
 		MaxSize:        3,
 		MinIdle:        1,
@@ -114,6 +127,7 @@ func TestPoolReuse(t *testing.T) {
 }
 
 func TestPoolExhaustionTimeout(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
 		MaxSize:        1,
 		MinIdle:        1,
@@ -136,6 +150,7 @@ func TestPoolExhaustionTimeout(t *testing.T) {
 }
 
 func TestPoolConcurrentAccess(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
 		MaxSize:        4,
 		MinIdle:        4,
@@ -190,6 +205,7 @@ func TestPoolConcurrentAccess(t *testing.T) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 func TestScopeAcquirePingRelease(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
@@ -208,6 +224,7 @@ func TestScopeAcquirePingRelease(t *testing.T) {
 }
 
 func TestScopeGetSet(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
@@ -231,6 +248,7 @@ func TestScopeGetSet(t *testing.T) {
 }
 
 func TestScopeReturnsEmptyForMissingKey(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
@@ -246,6 +264,7 @@ func TestScopeReturnsEmptyForMissingKey(t *testing.T) {
 }
 
 func TestScopeWatchMultiExec(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
@@ -282,6 +301,7 @@ func TestScopeWatchMultiExec(t *testing.T) {
 }
 
 func TestScopeRaisesAfterRelease(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
@@ -298,6 +318,7 @@ func TestScopeRaisesAfterRelease(t *testing.T) {
 }
 
 func TestScopeWatchConflictAbortsExec(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
@@ -335,6 +356,7 @@ func TestScopeWatchConflictAbortsExec(t *testing.T) {
 }
 
 func TestScopeOCCConcurrentIncrement(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
@@ -393,6 +415,7 @@ func TestScopeOCCConcurrentIncrement(t *testing.T) {
 }
 
 func TestScopeCloseIsIdempotent(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
@@ -408,6 +431,7 @@ func TestScopeCloseIsIdempotent(t *testing.T) {
 }
 
 func TestScopePoolReuse(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
@@ -431,6 +455,7 @@ func TestScopePoolReuse(t *testing.T) {
 }
 
 func TestPoolCloseRejectsAcquire(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
 		MaxSize:        2,
 		MinIdle:        1,
@@ -460,6 +485,7 @@ func compressedConfig() *config.ClientConfiguration {
 }
 
 func TestScopeCompressionWritesParity(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	// Client with compression
 	compressedClient, err := glide.NewClient(compressedConfig())
 	require.NoError(t, err)
@@ -499,6 +525,7 @@ func TestScopeCompressionWritesParity(t *testing.T) {
 }
 
 func TestScopeCompressionReadsParity(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	compressedClient, err := glide.NewClient(compressedConfig())
 	require.NoError(t, err)
 	defer compressedClient.Close()
@@ -525,6 +552,7 @@ func TestScopeCompressionReadsParity(t *testing.T) {
 }
 
 func TestScopeDatabaseInheritance(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	// Client configured for database 2
 	cfg := standaloneConfig().WithDatabaseId(2)
 
@@ -562,6 +590,7 @@ func TestScopeDatabaseInheritance(t *testing.T) {
 }
 
 func TestScopeReleaseResetsDatabase(t *testing.T) {
+	skipIfNoStandaloneEndpoints(t)
 	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	defer client.Close()
