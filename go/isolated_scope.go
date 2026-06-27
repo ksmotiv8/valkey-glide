@@ -3,6 +3,9 @@
 package glide
 
 // #include "lib.h"
+//
+// void successCallback(void *channelPtr, struct CommandResponse *message);
+// void failureCallback(void *channelPtr, char *errMessage, RequestErrorType errType);
 import "C"
 
 import (
@@ -132,40 +135,59 @@ func (s *IsolatedScope) cmd(ctx context.Context, command string, args ...string)
 		size += 4 + len(arg)
 	}
 
-	payload := make([]byte, 0, size)
-	payload = binary.LittleEndian.AppendUint32(payload, uint32(len(cmdBytes)))
-	payload = append(payload, cmdBytes...)
-	payload = binary.LittleEndian.AppendUint32(payload, uint32(len(args)))
+	wireData := make([]byte, 0, size)
+	wireData = binary.LittleEndian.AppendUint32(wireData, uint32(len(cmdBytes)))
+	wireData = append(wireData, cmdBytes...)
+	wireData = binary.LittleEndian.AppendUint32(wireData, uint32(len(args)))
 	for _, arg := range args {
 		argBytes := []byte(arg)
-		payload = binary.LittleEndian.AppendUint32(payload, uint32(len(argBytes)))
-		payload = append(payload, argBytes...)
+		wireData = binary.LittleEndian.AppendUint32(wireData, uint32(len(argBytes)))
+		wireData = append(wireData, argBytes...)
 	}
 
-	// Call FFI (blocking — executes on the Tokio pool runtime)
-	resultPtr := C.glide_scope_execute(
+	// Use async callback pattern (same as regular commands) — no thread blocking
+	resultChannel := make(chan payload, 1)
+	resultChannelPtr := unsafe.Pointer(&resultChannel)
+
+	pinner := pinner{}
+	pinnedChannelPtr := uintptr(pinner.Pin(resultChannelPtr))
+	defer pinner.Unpin()
+
+	rc := C.glide_scope_execute_async(
 		C.uint64_t(s.scopeID),
-		(*C.uint8_t)(unsafe.Pointer(&payload[0])),
-		C.uintptr_t(len(payload)),
+		(*C.uint8_t)(unsafe.Pointer(&wireData[0])),
+		C.uintptr_t(len(wireData)),
+		C.uintptr_t(pinnedChannelPtr),
+		C.SuccessCallback(unsafe.Pointer(C.successCallback)),
+		C.FailureCallback(unsafe.Pointer(C.failureCallback)),
 	)
 
-	if resultPtr == nil {
+	if rc == -1 {
 		return "", fmt.Errorf("scope execute failed: invalid scope %d", s.scopeID)
 	}
-	defer C.free_command_result(resultPtr)
-
-	// Check for error
-	if resultPtr.command_error != nil {
-		msg := C.GoString(resultPtr.command_error.command_error_message)
-		return "", fmt.Errorf("scope command error: %s", msg)
+	if rc == -2 {
+		return "", errors.New("scope execute failed: invalid command")
 	}
 
-	// Parse response
-	if resultPtr.response == nil {
-		return "", nil
+	// Wait for result or context cancellation
+	var result payload
+	select {
+	case <-ctx.Done():
+		// Async operation is in-flight — wait for it to complete to avoid use-after-free
+		go func() {
+			if p := <-resultChannel; p.value != nil {
+				C.free_command_response(p.value)
+			}
+		}()
+		return "", ctx.Err()
+	case result = <-resultChannel:
 	}
 
-	return parseScopeResponse(resultPtr.response), nil
+	if result.error != nil {
+		return "", fmt.Errorf("scope command error: %s", result.error.Error())
+	}
+
+	return parseScopeResponse(result.value), nil
 }
 
 // parseScopeResponse converts a CommandResponse to a Go string.
@@ -173,6 +195,7 @@ func parseScopeResponse(resp *C.struct_CommandResponse) string {
 	if resp == nil {
 		return ""
 	}
+	defer C.free_command_response(resp)
 
 	switch resp.response_type {
 	case 0: // Null

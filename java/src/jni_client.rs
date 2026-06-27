@@ -80,7 +80,9 @@ pub static JVM: std::sync::OnceLock<Arc<JavaVM>> = std::sync::OnceLock::new();
 static RUNTIME: std::sync::OnceLock<Runtime> = std::sync::OnceLock::new();
 
 // Defaults for runtime and callback workers
-const DEFAULT_RUNTIME_WORKER_THREADS: usize = 1;
+// NOTE: minimum 2 worker threads required for MultiplexedConnection (scope feature).
+// The connection's internal reader task must run concurrently with command sends.
+const DEFAULT_RUNTIME_WORKER_THREADS: usize = 2;
 const DEFAULT_CALLBACK_WORKER_THREADS: usize = 2;
 
 // =========================

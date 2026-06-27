@@ -14,10 +14,8 @@ import uuid
 import pytest
 import pytest_asyncio
 from glide import (
-    AsyncIsolatedScope,
     GlideClient,
     GlideClientConfiguration,
-    NodeAddress,
 )
 
 from tests.utils.utils import get_standalone_address as _get_standalone_address

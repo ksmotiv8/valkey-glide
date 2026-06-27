@@ -15,7 +15,6 @@ import pytest
 from glide import (
     AsyncClientPool,
     GlideClientConfiguration,
-    NodeAddress,
     PoolConfig,
 )
 

@@ -719,7 +719,7 @@ pub unsafe extern "C" fn glide_scope_prewarm(
     // Create the scope pool (registers it if not exists)
     let pool = glide_core::pool::get_or_create_scope_pool(client_id, conn_bytes.clone());
 
-    // Spawn min_idle background connection creation tasks on the pool runtime
+    // Spawn min_idle background connection creation tasks on the scope runtime
     for _ in 0..min_idle {
         let pool_clone = pool.clone();
         let bytes = conn_bytes.clone();
@@ -765,12 +765,8 @@ pub extern "C" fn glide_scope_release(scope_id: u64, client_id: u64) -> i32 {
 
 /// Execute a command on a scoped connection (synchronous — blocks until result).
 ///
-/// The command is serialized in the wire format:
-///   [4 bytes: cmd_name_len][cmd_name bytes][4 bytes: num_args]
-///   [4 bytes: arg1_len][arg1 bytes]...[4 bytes: argN_len][argN bytes]
-///
-/// Returns a `CommandResult*` pointer (caller must free with `free_command_result`).
-/// Returns null on error (invalid scope_id, deserialization failure).
+/// Used by Python async scopes via `run_in_executor` (blocking FFI call in a thread pool).
+/// Go uses `glide_scope_execute_async` instead.
 ///
 /// # Safety
 /// `command_ptr` must point to `command_len` valid bytes.
@@ -798,7 +794,6 @@ pub unsafe extern "C" fn glide_scope_execute(
         return std::ptr::null_mut();
     }
 
-    // Apply compression on write if the parent client has compression enabled
     let client_registry = scope::get_client_registry();
     let parent_client = {
         let pools = glide_core::pool::get_client_scope_pools();
@@ -828,8 +823,6 @@ pub unsafe extern "C" fn glide_scope_execute(
     let timeout_rx = glide_core::timeout_watchdog::TimeoutWatchdog::global()
         .register(timeout_duration, cmd_start);
 
-    // Execute with watchdog race — send_scope_command handles CB, inflight,
-    // compression, latency recording internally
     let result = runtime.block_on(async {
         let execute =
             scope::send_scope_command(scope_id, &cmd_name, &mut args, parent_client.as_ref());
@@ -882,8 +875,6 @@ pub unsafe extern "C" fn glide_scope_execute(
         unsafe { drop_otel_span(span_ptr) };
     }
 
-    // Convert result to CommandResult
-    // Fast path for simple responses (OK, Nil) — avoid arena allocation
     match result {
         Ok(Value::Okay) => {
             let resp = Box::into_raw(Box::new(CommandResponse {

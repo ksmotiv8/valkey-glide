@@ -11,7 +11,7 @@ import threading
 import uuid
 
 import pytest
-from glide_sync import GlideClient, GlideClientConfiguration, IsolatedScope, NodeAddress
+from glide_sync import GlideClient, GlideClientConfiguration
 
 from tests.utils.utils import get_standalone_address as _get_standalone_address
 

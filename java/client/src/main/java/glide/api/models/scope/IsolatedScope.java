@@ -113,11 +113,12 @@ public class IsolatedScope implements AutoCloseable {
         else if (result == -2)
             future.completeExceptionally(new IllegalArgumentException("Serialize failed"));
 
-        return future.thenApply(r -> {
-            if (r == null) return null;
-            if (r instanceof byte[]) return new String((byte[]) r, StandardCharsets.UTF_8);
-            return r.toString();
-        });
+        return future.thenApply(
+                r -> {
+                    if (r == null) return null;
+                    if (r instanceof byte[]) return new String((byte[]) r, StandardCharsets.UTF_8);
+                    return r.toString();
+                });
     }
 
     @Override

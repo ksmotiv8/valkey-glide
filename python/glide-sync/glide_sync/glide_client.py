@@ -4,7 +4,10 @@ import os
 import sys
 import threading
 from types import TracebackType
-from typing import Any, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
+
+if TYPE_CHECKING:
+    from .isolated_scope import IsolatedScope
 
 from glide_shared._fast_response import parse_response as _fast_parse_response
 from glide_shared._glide_ffi import _GlideFFI
@@ -1180,7 +1183,7 @@ class GlideClient(BaseClient, StandaloneCommands):
             time.sleep(min(backoff, remaining))
             backoff = min(backoff * 2, 0.5)  # Cap at 500ms
 
-    def _parse_scope_response(self, response_ptr) -> Optional[str]:
+    def _parse_scope_response(self, response_ptr) -> Optional[str]:  # noqa: C901
         """Parse a CommandResponse pointer from a scope execution into a Python string."""
         if response_ptr == self._ffi.NULL:
             return None

@@ -1421,6 +1421,13 @@ impl Client {
         }
     }
 
+    /// Returns true if this client is connected in cluster mode.
+    /// Used by scope connections to determine whether slot validation is needed.
+    pub async fn is_cluster_mode(&self) -> bool {
+        let client = self.internal_client.read().await;
+        matches!(&*client, ClientWrapper::Cluster { .. })
+    }
+
     /// Returns the cache hit rate (hits / total requests).
     /// Returns an error if caching is not enabled or metrics are disabled.
     pub fn cache_hit_rate(&self) -> RedisResult<Value> {

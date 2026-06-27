@@ -164,19 +164,25 @@ pub async fn execute_scope_command(
     let arg_refs: Vec<&[u8]> = args.iter().map(|a| a.as_slice()).collect();
     update_state_for_command(&mut conn.state, cmd_name, &arg_refs);
 
-    // Cluster mode: validate slot consistency
-    let key_args = extract_key_args(cmd_name, &arg_refs);
-    if !key_args.is_empty() {
-        match validate_scope_slot(conn.pinned_slot, &key_args) {
-            Ok(new_slot) => {
-                conn.pinned_slot = new_slot;
-            }
-            Err(e) => {
-                return Err(RedisError::from((
-                    redis::ErrorKind::CrossSlot,
-                    "CROSSSLOT",
-                    e,
-                )));
+    // Cluster mode: validate slot consistency (skip in standalone — no slots)
+    let is_cluster = match client {
+        Some(c) => c.is_cluster_mode().await,
+        None => false,
+    };
+    if is_cluster {
+        let key_args = extract_key_args(cmd_name, &arg_refs);
+        if !key_args.is_empty() {
+            match validate_scope_slot(conn.pinned_slot, &key_args) {
+                Ok(new_slot) => {
+                    conn.pinned_slot = new_slot;
+                }
+                Err(e) => {
+                    return Err(RedisError::from((
+                        redis::ErrorKind::CrossSlot,
+                        "CROSSSLOT",
+                        e,
+                    )));
+                }
             }
         }
     }
@@ -186,12 +192,6 @@ pub async fn execute_scope_command(
     cmd.arg(cmd_name.as_bytes());
     for arg in args {
         cmd.arg(arg.as_slice());
-    }
-
-    // DEBUG: verify compression state
-    if cmd_name == "SET" && args.len() > 1 && args[1].len() < 100 {
-        eprintln!("[EXEC_SCOPE DEBUG] SET with args[1] len={}, first_bytes={:?}",
-            args[1].len(), &args[1][..std::cmp::min(5, args[1].len())]);
     }
 
     // Execute via Client (gets timeout, decompression, IAM refresh) or raw fallback

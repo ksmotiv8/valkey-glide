@@ -7,6 +7,7 @@ import struct
 import sys
 import threading
 from typing import (
+    TYPE_CHECKING,
     Any,
     Dict,
     List,
@@ -15,6 +16,9 @@ from typing import (
     Union,
     cast,
 )
+
+if TYPE_CHECKING:
+    from .isolated_scope import AsyncIsolatedScope
 
 import sniffio
 
@@ -142,9 +146,13 @@ _pipe_remainder: bytes = b""
 _FRAME_STRUCT = struct.Struct("=QQQQ")  # Pre-compiled for hot path
 _PUBSUB_SENTINEL = 0xFFFFFFFFFFFFFFFF  # request_id sentinel for pubsub frames
 
-# Free-threading support: detect no-GIL builds and create a thread pool
-# for parallel response parsing when GIL is disabled.
+# Free-threading support: detect no-GIL builds for thread-safe data structure access.
+# Response parsing runs on the event loop thread for correctness. Under free-threading,
+# the _FREE_THREADED flag enables explicit locking on shared data structures.
 _FREE_THREADED: bool = hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled()
+
+# Thread pool for parallel response parsing on free-threaded builds.
+# Large responses (MGET, LRANGE) benefit from parsing across cores.
 _response_thread_pool = None
 if _FREE_THREADED:
     from concurrent.futures import ThreadPoolExecutor
@@ -175,13 +183,20 @@ def _free_orphaned_frame(request_id, response_ptr, arena_or_err):
 
 
 def _resolve_future(fut, result, client):
-    """Resolve a future with a result or exception, handling cross-loop dispatch."""
+    """Resolve a future with a result or exception, handling cross-loop/thread dispatch."""
     if isinstance(fut, _CompatFuture):
         (
             fut.set_exception(result)
             if isinstance(result, Exception)
             else fut.set_result(result)
         )
+    elif _FREE_THREADED and client._loop is not None:
+        # Under free-threading, handlers may run on thread pool workers.
+        # Must use call_soon_threadsafe to resolve futures on the event loop thread.
+        if isinstance(result, Exception):
+            client._loop.call_soon_threadsafe(fut.set_exception, result)
+        else:
+            client._loop.call_soon_threadsafe(fut.set_result, result)
     elif client._loop and client._loop != _async_pipe_loop:
         if isinstance(result, Exception):
             client._loop.call_soon_threadsafe(fut.set_exception, result)
@@ -1090,7 +1105,7 @@ class GlideClient(BaseClient, StandaloneCommands):
             self._parse_scope_response,
         )
 
-    def _parse_scope_response(self, response_ptr) -> Optional[str]:
+    def _parse_scope_response(self, response_ptr) -> Optional[str]:  # noqa: C901
         """Parse a CommandResponse pointer from a scope execution into a Python string."""
         if response_ptr == self._ffi.NULL:
             return None

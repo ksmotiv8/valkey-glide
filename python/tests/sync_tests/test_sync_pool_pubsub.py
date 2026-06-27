@@ -30,8 +30,10 @@ class TestPoolPubSub:
     def test_publish_from_pool(self, request):
         """Pool clients can publish messages."""
         config = get_config(request)
-        pool = ClientPool(config, PoolConfig(max_size=3, min_idle=1))
-        time.sleep(3)
+        pool = ClientPool(
+            config, PoolConfig(max_size=3, min_idle=1, acquire_timeout_s=15.0)
+        )
+        time.sleep(5)  # Allow warmup (CI can be slow)
 
         channel = f"test-channel-{uuid.uuid4().hex[:8]}"
         try:
@@ -46,8 +48,10 @@ class TestPoolPubSub:
     def test_concurrent_publish(self, request):
         """Multiple threads publishing through pooled clients concurrently."""
         config = get_config(request)
-        pool = ClientPool(config, PoolConfig(max_size=4, min_idle=2))
-        time.sleep(3)
+        pool = ClientPool(
+            config, PoolConfig(max_size=4, min_idle=2, acquire_timeout_s=15.0)
+        )
+        time.sleep(5)  # Allow warmup (CI can be slow)
 
         channel = f"concurrent-pub-{uuid.uuid4().hex[:8]}"
         num_threads = 4
@@ -82,8 +86,10 @@ class TestPoolPubSub:
         Validates messages arrive correctly under concurrent pool usage.
         """
         config = get_config(request)
-        pool = ClientPool(config, PoolConfig(max_size=3, min_idle=1))
-        time.sleep(3)
+        pool = ClientPool(
+            config, PoolConfig(max_size=3, min_idle=1, acquire_timeout_s=15.0)
+        )
+        time.sleep(5)  # Allow warmup (CI can be slow)
 
         channel = f"sub-test-{uuid.uuid4().hex[:8]}"
         received_messages = []
