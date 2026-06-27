@@ -393,6 +393,8 @@ class BaseClient(CoreCommands):
         self.config: BaseClientConfiguration = config
         self._is_closed: bool = False
         self._core_client = None
+        self._conn_req_bytes: bytes = b""
+        self._pubsub_callback_ref = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None  # set in create()
         self._pending_futures: Dict[int, "TFuture"] = {}
         self._callback_id_gen = itertools.count(1)

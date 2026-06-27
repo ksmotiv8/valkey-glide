@@ -423,19 +423,19 @@ pub extern "C" fn glide_pool_destroy(pool_id: u64) -> i32 {
         Some(arc) => arc,
         None => return -1,
     };
-    if let Ok(mut pool) = pool_arc.try_lock() {
-        // Clean up POOL_CLIENTS entries for all clients owned by this pool
-        let client_ids: Vec<u64> = pool
-            .idle
-            .iter()
-            .map(|e| e.client_id)
-            .chain(pool.in_use.iter().map(|e| *e.key()))
-            .collect();
-        for cid in client_ids {
-            get_pool_clients().remove(&cid);
-        }
-        pool.destroy();
+    let mut pool = pool_arc.blocking_lock();
+    // Clean up POOL_CLIENTS entries for all clients owned by this pool
+    let client_ids: Vec<u64> = pool
+        .idle
+        .iter()
+        .map(|e| e.client_id)
+        .chain(pool.in_use.iter().map(|e| *e.key()))
+        .collect();
+    for cid in client_ids {
+        get_pool_clients().remove(&cid);
     }
+    pool.destroy();
+    drop(pool);
     // Clean up stored ClientType for this pool
     get_pool_client_types().remove(&pool_id);
     0

@@ -646,9 +646,6 @@ impl ScopePool {
                 return scope_id as i64;
             }
         }
-        if self.total_count.load(Ordering::Acquire) < self.config.max_total {
-            self.total_count.fetch_add(1, Ordering::AcqRel);
-        }
         -1
     }
 

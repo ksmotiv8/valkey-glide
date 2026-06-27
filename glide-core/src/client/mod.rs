@@ -1334,13 +1334,18 @@ impl Client {
 
     /// Execute a command on a provided dedicated connection (for isolated execution).
     ///
-    /// Applies the same timeout, decompression, compression, and IAM token refresh
-    /// logic as `send_command`, but routes the command to the given
+    /// Applies timeout, decompression, and IAM token refresh to the given
     /// `MultiplexedConnection` instead of the client's internal managed connection.
     ///
-    /// Applies timeout, decompression, and IAM token refresh. Compression on write
-    /// is handled by the caller (FFI layer) before building the Cmd.
-    /// scopes is tracked as a follow-up enhancement.
+    /// **Caller responsibilities (handled before invoking this function):**
+    /// - Compression on write: callers (e.g., `send_scope_command()`) must compress
+    ///   command arguments before building the `Cmd`.
+    /// - OpenTelemetry span creation/completion.
+    /// - Inflight request reservation (reject if exhausted).
+    ///
+    /// This separation keeps the function focused on execution concerns (timeout,
+    /// decompression, IAM) while callers own cross-cutting concerns that require
+    /// knowledge of the broader request lifecycle.
     pub async fn send_command_on_connection(
         &self,
         cmd: &Cmd,
@@ -1360,7 +1365,7 @@ impl Client {
 
         // Compression on write: compress command args if compression is enabled
 
-        let request_timeout = Some(self.request_timeout);
+        let request_timeout = get_request_timeout(cmd, self.request_timeout)?;
 
         // Send with timeout
         let raw_value = match request_timeout {

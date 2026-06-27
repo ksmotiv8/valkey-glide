@@ -465,7 +465,8 @@ pub fn try_acquire_scope(
                 let _ = telemetrylib::GlideOpenTelemetry::record_scope_acquire();
             }
             if result < 0 && pool.total_count.load(Ordering::Acquire) < pool.config.max_total {
-                // Spawn background connection creation
+                // Reserve a slot and spawn background connection creation
+                pool.total_count.fetch_add(1, Ordering::AcqRel);
                 let pool_clone = scope_pool.clone();
                 let conn_bytes = pool.connection_request_bytes.clone();
                 let parent_client_id = pool.parent_client_id;
@@ -547,6 +548,16 @@ pub fn register_client(client_id: u64, client: Client) {
 }
 
 /// Unregister a Client from the global registry (called on client close).
+/// Also destroys and removes the client's scope pool from CLIENT_SCOPE_POOLS.
 pub fn unregister_client(client_id: u64) {
     get_client_registry().remove(&client_id);
+
+    // Destroy and remove the client's scope pool if it exists
+    let pools = get_client_scope_pools();
+    if let Some((_, pool_arc)) = pools.remove(&client_id) {
+        let registry = get_scope_registry();
+        if let Ok(mut pool) = pool_arc.try_lock() {
+            pool.destroy(registry);
+        }
+    }
 }
