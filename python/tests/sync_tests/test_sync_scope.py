@@ -14,11 +14,21 @@ import pytest
 from glide_sync import GlideClient, GlideClientConfiguration, IsolatedScope, NodeAddress
 
 
+def _get_standalone_address():
+    """Get standalone server address from conftest (CI) or fallback to localhost."""
+    try:
+        cluster = pytest.standalone_cluster  # type: ignore[attr-defined]
+        addr = cluster.nodes_addr[0]
+        return NodeAddress(addr.host, addr.port)
+    except (AttributeError, IndexError):
+        return NodeAddress("localhost", 6379)
+
+
 @pytest.fixture
 def client():
     """Create a connected GlideClient."""
     config = GlideClientConfiguration(
-        addresses=[NodeAddress("localhost", 6379)],
+        addresses=[_get_standalone_address()],
         request_timeout=5000,
     )
     c = GlideClient.create(config)
