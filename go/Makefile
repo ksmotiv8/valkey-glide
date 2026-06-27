@@ -114,7 +114,7 @@ build-glide-ffi: libglide_ffi gen-c-bindings
 
 gen-c-bindings:
 	cd $(GLIDE_FFI_PATH) && \
-	cbindgen --config cbindgen.toml --crate glide-ffi --output $(GO_DIR)/lib.h --lang c
+	cbindgen -q --config cbindgen.toml --crate glide-ffi --output $(GO_DIR)/lib.h --lang c
 	@# Add include guard to prevent multiple inclusion errors with CGo
 	@awk 'NR==1 {print; print "#pragma once"; next} {print}' \
 		$(GO_DIR)/lib.h > $(GO_DIR)/lib.h.new && \

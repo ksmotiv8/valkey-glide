@@ -490,6 +490,9 @@ pub fn release_scope(scope_id: u64, client_id: u64, runtime: &tokio::runtime::Ha
     let pool_clone = scope_pool.clone();
     match scope_pool.try_lock() {
         Ok(mut pool) => {
+            // Enter the runtime context so tokio::spawn inside pool.release()
+            // (for dirty-state cleanup) has a reactor available.
+            let _guard = runtime.enter();
             pool.release(scope_id, registry);
             let _ = telemetrylib::GlideOpenTelemetry::record_scope_release();
             0
