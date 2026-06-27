@@ -7,7 +7,9 @@ inflight limits) are properly inherited and respected by scoped connections.
 Ensures scope operations maintain full functional parity with regular commands —
 the same options and limitations apply.
 
-Requires a running Valkey server (standalone).
+Tests run in both standalone and cluster modes where applicable.
+
+Requires a running Valkey server (standalone, and optionally cluster).
 """
 
 import threading
@@ -20,8 +22,12 @@ from glide_sync import (
     CompressionConfiguration,
     GlideClient,
     GlideClientConfiguration,
+    GlideClusterClient,
+    GlideClusterClientConfiguration,
+    InfoSection,
     NodeAddress,
 )
+from packaging import version
 
 
 def _get_standalone_address():
@@ -32,6 +38,34 @@ def _get_standalone_address():
         return NodeAddress(addr.host, addr.port)
     except (AttributeError, IndexError):
         return NodeAddress("localhost", 6379)
+
+
+def _get_cluster_addresses():
+    """Get the cluster server addresses from conftest (CI) or fallback to localhost:7000."""
+    try:
+        cluster = pytest.valkey_cluster  # type: ignore[attr-defined]
+        return [NodeAddress(addr.host, addr.port) for addr in cluster.nodes_addr]
+    except (AttributeError, IndexError):
+        return [NodeAddress("localhost", 7000)]
+
+
+def _get_server_version(client) -> str:
+    """Get server version string from a connected client."""
+    info_str = client.info([InfoSection.SERVER])
+    for line in info_str.split("\n"):
+        if line.startswith("valkey_version:") or line.startswith("redis_version:"):
+            return line.split(":")[1].strip()
+    return "0.0.0"
+
+
+def _skip_cluster_if_unavailable():
+    """Skip test if no cluster endpoints are configured."""
+    try:
+        cluster = pytest.valkey_cluster  # type: ignore[attr-defined]
+        if cluster is None or len(cluster.nodes_addr) == 0:
+            pytest.skip("No cluster endpoints available")
+    except AttributeError:
+        pytest.skip("No cluster endpoints available (pytest.valkey_cluster not set)")
 
 
 # ─── Client Pooling (matches conftest pattern from #6335) ─────────────────────
@@ -719,3 +753,284 @@ class TestScopeInflightEnforcement:
             except Exception:
                 pass
             client.close()
+
+
+# ─── Cluster Mode Basic Scope Tests ──────────────────────────────────────────
+
+
+class TestClusterScopeBasicOperations:
+    """Tests that basic scope operations (acquire, release, WATCH/MULTI/EXEC) work in cluster mode."""
+
+    @pytest.fixture
+    def cluster_client(self):
+        """Create a GlideClusterClient for basic scope tests."""
+        _skip_cluster_if_unavailable()
+        config = GlideClusterClientConfiguration(
+            addresses=_get_cluster_addresses(),
+            request_timeout=5000,
+        )
+        client = GlideClusterClient.create(config)
+        yield client
+        client.close()
+
+    def test_cluster_scope_acquire_and_release(self, cluster_client):
+        """Scope can be acquired and released on a cluster client."""
+        with cluster_client.scoped_connection() as scope:
+            result = scope.execute_command("PING")
+            assert result == "PONG"
+
+    def test_cluster_scope_get_set(self, cluster_client):
+        """Basic GET/SET works via scoped connection in cluster mode."""
+        key = f"{{scope-test}}-cluster-basic-{uuid.uuid4().hex[:8]}"
+
+        with cluster_client.scoped_connection() as scope:
+            scope.set(key, "cluster-value")
+            val = scope.get(key)
+            assert val == "cluster-value"
+
+        # Verify via parent client
+        result = cluster_client.get(key)
+        assert result == b"cluster-value"
+
+        # Cleanup
+        cluster_client.delete([key])
+
+    def test_cluster_scope_watch_multi_exec(self, cluster_client):
+        """WATCH/MULTI/EXEC works correctly via scoped connection in cluster mode."""
+        key = f"{{scope-test}}-cluster-occ-{uuid.uuid4().hex[:8]}"
+        cluster_client.set(key, "0")
+
+        with cluster_client.scoped_connection() as scope:
+            scope.watch(key)
+            current = scope.get(key)
+            assert current == "0"
+
+            scope.multi()
+            scope.set(key, "1")
+            result = scope.exec()
+            assert result is not None and result != "None"
+
+        # Verify
+        final = cluster_client.get(key)
+        assert final == b"1"
+
+        # Cleanup
+        cluster_client.delete([key])
+
+    def test_cluster_scope_watch_conflict_aborts_exec(self, cluster_client):
+        """WATCH detects external modification and EXEC returns nil in cluster mode."""
+        key = f"{{scope-test}}-cluster-conflict-{uuid.uuid4().hex[:8]}"
+        cluster_client.set(key, "original")
+
+        with cluster_client.scoped_connection() as scope:
+            scope.watch(key)
+            scope.get(key)
+
+            # Modify externally via the main client
+            cluster_client.set(key, "modified-externally")
+
+            scope.multi()
+            scope.set(key, "from-scope")
+            result = scope.exec()
+            # EXEC returns None when transaction is aborted
+            assert result is None or result == "None"
+
+        # Verify external modification persists
+        val = cluster_client.get(key)
+        assert val == b"modified-externally"
+
+        # Cleanup
+        cluster_client.delete([key])
+
+    def test_cluster_scope_raises_after_release(self, cluster_client):
+        """Commands fail after scope is released in cluster mode."""
+        scope = cluster_client.scoped_connection().__enter__()
+        scope.execute_command("PING")
+        scope.__exit__(None, None, None)
+
+        try:
+            scope.execute_command("PING")
+            assert False, "Should have raised after release"
+        except Exception:
+            pass  # Expected — scope is released
+
+
+# ─── Cluster Mode Compression Tests ──────────────────────────────────────────
+
+
+class TestClusterScopeCompression:
+    """Tests that scoped connections work with compression in cluster mode."""
+
+    @pytest.fixture
+    def cluster_compressed_client(self):
+        """Create a GlideClusterClient with ZSTD compression enabled."""
+        _skip_cluster_if_unavailable()
+        config = GlideClusterClientConfiguration(
+            addresses=_get_cluster_addresses(),
+            request_timeout=5000,
+            compression=CompressionConfiguration(
+                enabled=True,
+                backend=CompressionBackend.ZSTD,
+                compression_level=3,
+                min_compression_size=64,
+            ),
+        )
+        client = GlideClusterClient.create(config)
+        yield client
+        client.close()
+
+    @pytest.fixture
+    def cluster_raw_client(self):
+        """Create a GlideClusterClient WITHOUT compression (for verification)."""
+        _skip_cluster_if_unavailable()
+        config = GlideClusterClientConfiguration(
+            addresses=_get_cluster_addresses(),
+            request_timeout=5000,
+        )
+        client = GlideClusterClient.create(config)
+        yield client
+        client.close()
+
+    def test_cluster_scope_writes_compressed_data(
+        self, cluster_compressed_client, cluster_raw_client
+    ):
+        """Data written via scope with compression in cluster mode should be compressed."""
+        # Use {hash_tag} to ensure same-slot routing
+        key = f"{{scope-test}}-cluster-compress-write-{uuid.uuid4().hex[:8]}"
+        large_value = "A" * 500  # 500 bytes, well above 64-byte threshold
+
+        # Write via scoped connection
+        with cluster_compressed_client.scoped_connection() as scope:
+            scope.set(key, large_value)
+
+        # Read with same client (decompresses) — should match
+        result = cluster_compressed_client.get(key)
+        assert result == large_value.encode()
+
+        # Read with raw client (no compression) — should differ (compressed bytes)
+        raw_result = cluster_raw_client.get(key)
+        assert (
+            raw_result != large_value.encode()
+        ), "Value stored via compressed scope should be compressed in Valkey (cluster)"
+
+        # Cleanup
+        cluster_compressed_client.delete([key])
+
+    def test_cluster_scope_reads_compressed_data(self, cluster_compressed_client):
+        """Scoped GET should decompress data written by the parent client in cluster."""
+        key = f"{{scope-test}}-cluster-compress-read-{uuid.uuid4().hex[:8]}"
+        value = "CompressibleData_" * 50  # ~850 bytes
+
+        # Write via parent client (compressed)
+        cluster_compressed_client.set(key, value)
+
+        # Read via scoped connection — should decompress correctly
+        with cluster_compressed_client.scoped_connection() as scope:
+            retrieved = scope.get(key)
+            assert retrieved == value
+
+        # Cleanup
+        cluster_compressed_client.delete([key])
+
+    def test_cluster_scope_roundtrip_with_compression(self, cluster_compressed_client):
+        """Full round-trip: scope SET → scope GET on same scope in cluster mode."""
+        key = f"{{scope-test}}-cluster-roundtrip-{uuid.uuid4().hex[:8]}"
+        value = "RoundTripData_" * 40  # ~560 bytes
+
+        with cluster_compressed_client.scoped_connection() as scope:
+            scope.set(key, value)
+            retrieved = scope.get(key)
+            assert retrieved == value
+
+        # Cleanup
+        cluster_compressed_client.delete([key])
+
+    def test_cluster_scope_small_values_not_compressed(
+        self, cluster_raw_client
+    ):
+        """Values below minCompressionSize are stored uncompressed in cluster mode."""
+        _skip_cluster_if_unavailable()
+        config = GlideClusterClientConfiguration(
+            addresses=_get_cluster_addresses(),
+            request_timeout=5000,
+            compression=CompressionConfiguration(
+                enabled=True,
+                backend=CompressionBackend.ZSTD,
+                min_compression_size=256,  # Only compress >= 256 bytes
+            ),
+        )
+        client = GlideClusterClient.create(config)
+
+        key = f"{{scope-test}}-cluster-small-{uuid.uuid4().hex[:8]}"
+        small_value = "hello"  # 5 bytes — well below threshold
+
+        # Write via scope
+        with client.scoped_connection() as scope:
+            scope.set(key, small_value)
+
+        # Raw client should see the original value (not compressed)
+        raw_result = cluster_raw_client.get(key)
+        assert (
+            raw_result == small_value.encode()
+        ), "Small values below minCompressionSize should NOT be compressed (cluster)"
+
+        # Cleanup
+        client.delete([key])
+        client.close()
+
+
+# ─── Cluster Mode Database Tests (Valkey 9+ only) ────────────────────────────
+
+
+class TestClusterDatabaseStateInheritance:
+    """Tests that database selection works in cluster mode (requires Valkey 9+)."""
+
+    @pytest.fixture
+    def cluster_client_db2(self):
+        """Create a GlideClusterClient configured for database 2 (Valkey 9+)."""
+        _skip_cluster_if_unavailable()
+        config = GlideClusterClientConfiguration(
+            addresses=_get_cluster_addresses(),
+            request_timeout=5000,
+            database_id=2,
+        )
+        try:
+            client = GlideClusterClient.create(config)
+        except Exception:
+            pytest.skip("Cluster database selection not supported (requires Valkey 9+)")
+        # Verify version
+        ver = _get_server_version(client)
+        if version.parse(ver) < version.parse("9.0.0"):
+            client.close()
+            pytest.skip(f"Requires Valkey 9+ for cluster database selection (got {ver})")
+        yield client
+        client.close()
+
+    def test_cluster_scope_inherits_configured_database(self, cluster_client_db2):
+        """Scope connections in cluster mode use the database from the client's config."""
+        key = f"{{scope-test}}-cluster-db2-{uuid.uuid4().hex[:8]}"
+
+        # Write via scope on database 2
+        with cluster_client_db2.scoped_connection() as scope:
+            scope.set(key, "on-db2")
+            val = scope.get(key)
+            assert val == "on-db2"
+
+        # Parent client (also on db 2) should see the key
+        result = cluster_client_db2.get(key)
+        assert result == b"on-db2"
+
+        # A client on database 0 should NOT see the key
+        config_db0 = GlideClusterClientConfiguration(
+            addresses=_get_cluster_addresses(),
+            request_timeout=5000,
+        )
+        client_db0 = GlideClusterClient.create(config_db0)
+        result_db0 = client_db0.get(key)
+        assert (
+            result_db0 is None
+        ), "Key written on db2 via scope should not be visible on db0 (cluster)"
+        client_db0.close()
+
+        # Cleanup
+        cluster_client_db2.custom_command(["DEL", key])

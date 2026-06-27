@@ -1,14 +1,19 @@
 /** Copyright Valkey GLIDE Project Contributors - SPDX Identifier: Apache-2.0 */
 package glide.scope;
 
+import static glide.TestConfiguration.CLUSTER_HOSTS;
+import static glide.TestConfiguration.SERVER_VERSION;
 import static glide.utils.Java8Utils.repeat;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import glide.TestConfiguration;
 import glide.api.GlideClient;
+import glide.api.GlideClusterClient;
 import glide.api.models.configuration.CompressionBackend;
 import glide.api.models.configuration.CompressionConfiguration;
 import glide.api.models.configuration.GlideClientConfiguration;
+import glide.api.models.configuration.GlideClusterClientConfiguration;
 import glide.api.models.configuration.NodeAddress;
 import glide.api.models.scope.IsolatedScope;
 import java.time.Duration;
@@ -398,5 +403,313 @@ public class ScopeConnectionModifiersTest {
         client.close();
 
         System.out.println("WATCH/MULTI/EXEC with compression test PASSED!");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Cluster Mode Tests
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    private static GlideClusterClientConfiguration.GlideClusterClientConfigurationBuilder<?, ?>
+            clusterConfigBuilder() {
+        GlideClusterClientConfiguration.GlideClusterClientConfigurationBuilder<?, ?> builder =
+                GlideClusterClientConfiguration.builder();
+        for (String host : CLUSTER_HOSTS) {
+            String[] parts = host.split(":");
+            builder.address(
+                    NodeAddress.builder().host(parts[0]).port(Integer.parseInt(parts[1])).build());
+        }
+        return builder.requestTimeout(5000);
+    }
+
+    private static boolean clusterAvailable() {
+        return CLUSTER_HOSTS.length > 0 && !CLUSTER_HOSTS[0].isEmpty();
+    }
+
+    // ─── Cluster: Basic Scope Operations ─────────────────────────────────────────
+
+    @Test
+    public void testClusterScopeAcquireAndRelease() throws Exception {
+        assumeTrue(clusterAvailable(), "No cluster endpoints configured");
+        System.out.println("\n=== Test: Cluster scope acquire and release ===");
+
+        GlideClusterClient client =
+                GlideClusterClient.createClient(clusterConfigBuilder().build()).get(10, TimeUnit.SECONDS);
+
+        try (IsolatedScope scope =
+                client.scopedConnection(Duration.ofSeconds(10)).get(10, TimeUnit.SECONDS)) {
+            String result = scope.executeCommand("PING").get(5, TimeUnit.SECONDS);
+            assertNotNull(result);
+        }
+
+        client.close();
+        System.out.println("Cluster scope acquire and release test PASSED!");
+    }
+
+    @Test
+    public void testClusterScopeGetSet() throws Exception {
+        assumeTrue(clusterAvailable(), "No cluster endpoints configured");
+        System.out.println("\n=== Test: Cluster scope GET/SET ===");
+
+        GlideClusterClient client =
+                GlideClusterClient.createClient(clusterConfigBuilder().build()).get(10, TimeUnit.SECONDS);
+
+        // Use hash tag to ensure same-slot routing
+        String key = "{scope-test}-cluster-basic-" + UUID.randomUUID();
+
+        try (IsolatedScope scope =
+                client.scopedConnection(Duration.ofSeconds(10)).get(10, TimeUnit.SECONDS)) {
+            scope.set(key, "cluster-value").get(5, TimeUnit.SECONDS);
+            String val = scope.get(key).get(5, TimeUnit.SECONDS);
+            assertEquals("cluster-value", val);
+        }
+
+        // Verify via parent client
+        String result = client.get(key).get(5, TimeUnit.SECONDS);
+        assertEquals("cluster-value", result);
+
+        // Cleanup
+        client.del(new String[] {key}).get(5, TimeUnit.SECONDS);
+        client.close();
+        System.out.println("Cluster scope GET/SET test PASSED!");
+    }
+
+    @Test
+    public void testClusterScopeWatchMultiExec() throws Exception {
+        assumeTrue(clusterAvailable(), "No cluster endpoints configured");
+        System.out.println("\n=== Test: Cluster scope WATCH/MULTI/EXEC ===");
+
+        GlideClusterClient client =
+                GlideClusterClient.createClient(clusterConfigBuilder().build()).get(10, TimeUnit.SECONDS);
+
+        String key = "{scope-test}-cluster-occ-" + UUID.randomUUID();
+        client.set(key, "0").get(5, TimeUnit.SECONDS);
+
+        try (IsolatedScope scope =
+                client.scopedConnection(Duration.ofSeconds(10)).get(10, TimeUnit.SECONDS)) {
+            scope.watch(key).get(5, TimeUnit.SECONDS);
+            String current = scope.get(key).get(5, TimeUnit.SECONDS);
+            assertEquals("0", current);
+
+            scope.multi().get(5, TimeUnit.SECONDS);
+            scope.set(key, "1").get(5, TimeUnit.SECONDS);
+            String execResult = scope.exec().get(5, TimeUnit.SECONDS);
+            assertNotNull(execResult, "EXEC should succeed (no conflict)");
+        }
+
+        // Verify
+        String finalVal = client.get(key).get(5, TimeUnit.SECONDS);
+        assertEquals("1", finalVal);
+
+        // Cleanup
+        client.del(new String[] {key}).get(5, TimeUnit.SECONDS);
+        client.close();
+        System.out.println("Cluster scope WATCH/MULTI/EXEC test PASSED!");
+    }
+
+    @Test
+    public void testClusterScopeWatchConflictAbortsExec() throws Exception {
+        assumeTrue(clusterAvailable(), "No cluster endpoints configured");
+        System.out.println("\n=== Test: Cluster scope WATCH conflict aborts EXEC ===");
+
+        GlideClusterClient client =
+                GlideClusterClient.createClient(clusterConfigBuilder().build()).get(10, TimeUnit.SECONDS);
+
+        String key = "{scope-test}-cluster-conflict-" + UUID.randomUUID();
+        client.set(key, "original").get(5, TimeUnit.SECONDS);
+
+        try (IsolatedScope scope =
+                client.scopedConnection(Duration.ofSeconds(10)).get(10, TimeUnit.SECONDS)) {
+            scope.watch(key).get(5, TimeUnit.SECONDS);
+            scope.get(key).get(5, TimeUnit.SECONDS);
+
+            // Modify externally via the main client
+            client.set(key, "modified-externally").get(5, TimeUnit.SECONDS);
+
+            scope.multi().get(5, TimeUnit.SECONDS);
+            scope.set(key, "from-scope").get(5, TimeUnit.SECONDS);
+            String execResult = scope.exec().get(5, TimeUnit.SECONDS);
+            // EXEC returns null when transaction is aborted
+            assertNull(execResult, "EXEC should return null on conflict");
+        }
+
+        // Verify external modification persists
+        String val = client.get(key).get(5, TimeUnit.SECONDS);
+        assertEquals("modified-externally", val);
+
+        // Cleanup
+        client.del(new String[] {key}).get(5, TimeUnit.SECONDS);
+        client.close();
+        System.out.println("Cluster scope WATCH conflict test PASSED!");
+    }
+
+    // ─── Cluster: Compression ────────────────────────────────────────────────────
+
+    @Test
+    public void testClusterScopeInheritsCompression() throws Exception {
+        assumeTrue(clusterAvailable(), "No cluster endpoints configured");
+        System.out.println("\n=== Test: Cluster scope inherits compression settings ===");
+
+        CompressionConfiguration compressionConfig =
+                CompressionConfiguration.builder()
+                        .enabled(true)
+                        .backend(CompressionBackend.ZSTD)
+                        .compressionLevel(3)
+                        .minCompressionSize(64)
+                        .build();
+
+        GlideClusterClient client =
+                GlideClusterClient.createClient(
+                                clusterConfigBuilder().compressionConfiguration(compressionConfig).build())
+                        .get(10, TimeUnit.SECONDS);
+
+        String key = "{scope-test}-cluster-compress-" + UUID.randomUUID();
+        String largeValue = repeat("A", 500); // 500 bytes — well above threshold
+
+        // SET via scoped connection
+        try (IsolatedScope scope =
+                client.scopedConnection(Duration.ofSeconds(10)).get(10, TimeUnit.SECONDS)) {
+            scope.set(key, largeValue).get(5, TimeUnit.SECONDS);
+        }
+
+        // GET via normal client (with same compression) should decompress
+        String retrieved = client.get(key).get(5, TimeUnit.SECONDS);
+        assertEquals(
+                largeValue,
+                retrieved,
+                "Scoped SET with compression should be readable by the parent client (cluster)");
+
+        // Verify compression happened: raw client should see different bytes
+        GlideClusterClient rawClient =
+                GlideClusterClient.createClient(clusterConfigBuilder().build()).get(10, TimeUnit.SECONDS);
+        String rawValue = rawClient.get(key).get(5, TimeUnit.SECONDS);
+        assertNotEquals(
+                largeValue,
+                rawValue,
+                "Value stored via compressed scope should be compressed in Valkey (cluster)");
+
+        // Cleanup
+        client.del(new String[] {key}).get(5, TimeUnit.SECONDS);
+        rawClient.close();
+        client.close();
+        System.out.println("Cluster scope compression test PASSED!");
+    }
+
+    @Test
+    public void testClusterScopeReadsCompressedData() throws Exception {
+        assumeTrue(clusterAvailable(), "No cluster endpoints configured");
+        System.out.println("\n=== Test: Cluster scope reads compressed data ===");
+
+        CompressionConfiguration compressionConfig =
+                CompressionConfiguration.builder().enabled(true).backend(CompressionBackend.ZSTD).build();
+
+        GlideClusterClient client =
+                GlideClusterClient.createClient(
+                                clusterConfigBuilder().compressionConfiguration(compressionConfig).build())
+                        .get(10, TimeUnit.SECONDS);
+
+        String key = "{scope-test}-cluster-read-compress-" + UUID.randomUUID();
+        String value = repeat("CompressibleData_", 50); // ~850 bytes
+
+        // Write via normal client (compressed)
+        client.set(key, value).get(5, TimeUnit.SECONDS);
+
+        // Read via scoped connection — should decompress correctly
+        try (IsolatedScope scope =
+                client.scopedConnection(Duration.ofSeconds(10)).get(10, TimeUnit.SECONDS)) {
+            String retrieved = scope.get(key).get(5, TimeUnit.SECONDS);
+            assertEquals(
+                    value,
+                    retrieved,
+                    "Scoped GET should decompress data written by the parent client (cluster)");
+        }
+
+        // Cleanup
+        client.del(new String[] {key}).get(5, TimeUnit.SECONDS);
+        client.close();
+        System.out.println("Cluster scope reads compressed data test PASSED!");
+    }
+
+    @Test
+    public void testClusterScopeWatchTransactionWithCompression() throws Exception {
+        assumeTrue(clusterAvailable(), "No cluster endpoints configured");
+        System.out.println("\n=== Test: Cluster WATCH/MULTI/EXEC with compression ===");
+
+        CompressionConfiguration compressionConfig =
+                CompressionConfiguration.builder()
+                        .enabled(true)
+                        .backend(CompressionBackend.ZSTD)
+                        .minCompressionSize(64)
+                        .build();
+
+        GlideClusterClient client =
+                GlideClusterClient.createClient(
+                                clusterConfigBuilder().compressionConfiguration(compressionConfig).build())
+                        .get(10, TimeUnit.SECONDS);
+
+        String key = "{scope-test}-cluster-watch-compress-" + UUID.randomUUID();
+        String initialValue = repeat("InitialLargeValue_", 20);
+        client.set(key, initialValue).get(5, TimeUnit.SECONDS);
+
+        try (IsolatedScope scope =
+                client.scopedConnection(Duration.ofSeconds(10)).get(10, TimeUnit.SECONDS)) {
+            scope.watch(key).get(5, TimeUnit.SECONDS);
+            String current = scope.get(key).get(5, TimeUnit.SECONDS);
+            assertEquals(initialValue, current, "WATCH should read the decompressed value (cluster)");
+
+            String newValue = repeat("UpdatedLargeValue_", 20);
+            scope.multi().get(5, TimeUnit.SECONDS);
+            scope.set(key, newValue).get(5, TimeUnit.SECONDS);
+            String execResult = scope.exec().get(5, TimeUnit.SECONDS);
+            assertNotNull(execResult, "EXEC should succeed (no conflict, cluster)");
+        }
+
+        String finalVal = client.get(key).get(5, TimeUnit.SECONDS);
+        assertTrue(
+                finalVal.startsWith("UpdatedLargeValue_"),
+                "Final value should be the updated compressed value (cluster)");
+
+        // Cleanup
+        client.del(new String[] {key}).get(5, TimeUnit.SECONDS);
+        client.close();
+        System.out.println("Cluster WATCH/MULTI/EXEC with compression test PASSED!");
+    }
+
+    // ─── Cluster: Database State (Valkey 9+ only) ────────────────────────────────
+
+    @Test
+    public void testClusterScopeInheritsConfiguredDatabase() throws Exception {
+        assumeTrue(clusterAvailable(), "No cluster endpoints configured");
+        assumeTrue(
+                SERVER_VERSION.isGreaterThanOrEqualTo("9.0.0"), "SELECT in cluster requires Valkey 9+");
+        System.out.println("\n=== Test: Cluster scope inherits configured database (Valkey 9+) ===");
+
+        GlideClusterClient client =
+                GlideClusterClient.createClient(clusterConfigBuilder().databaseId(2).build())
+                        .get(10, TimeUnit.SECONDS);
+
+        String key = "{scope-test}-cluster-db2-" + UUID.randomUUID();
+
+        try (IsolatedScope scope =
+                client.scopedConnection(Duration.ofSeconds(10)).get(10, TimeUnit.SECONDS)) {
+            scope.set(key, "on-db2").get(5, TimeUnit.SECONDS);
+            String val = scope.get(key).get(5, TimeUnit.SECONDS);
+            assertEquals("on-db2", val);
+        }
+
+        // Parent client (also on db 2) should see the key
+        String result = client.get(key).get(5, TimeUnit.SECONDS);
+        assertEquals("on-db2", result);
+
+        // A client on database 0 should NOT see the key
+        GlideClusterClient clientDb0 =
+                GlideClusterClient.createClient(clusterConfigBuilder().build()).get(10, TimeUnit.SECONDS);
+        String resultDb0 = clientDb0.get(key).get(5, TimeUnit.SECONDS);
+        assertNull(resultDb0, "Key written on db2 via scope should not be visible on db0 (cluster)");
+
+        // Cleanup
+        client.del(new String[] {key}).get(5, TimeUnit.SECONDS);
+        clientDb0.close();
+        client.close();
+        System.out.println("Cluster scope database inheritance test PASSED!");
     }
 }

@@ -603,3 +603,197 @@ func TestScopeReleaseResetsDatabase(t *testing.T) {
 		cleanupClient.Close()
 	}
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Cluster Mode Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func clusterConfig() *config.ClusterClientConfiguration {
+	host := "localhost"
+	port := 7000
+	// Use the --cluster-endpoints flag provided by CI
+	if clusterHosts != nil && *clusterHosts != "" {
+		parts := strings.SplitN(*clusterHosts, ",", 2)
+		hostPort := strings.SplitN(parts[0], ":", 2)
+		if len(hostPort) == 2 {
+			host = hostPort[0]
+			if p, err := strconv.Atoi(hostPort[1]); err == nil {
+				port = p
+			}
+		}
+	}
+	return config.NewClusterClientConfiguration().
+		WithAddress(&config.NodeAddress{Host: host, Port: port}).
+		WithRequestTimeout(5000 * time.Millisecond)
+}
+
+func clusterAvailable() bool {
+	return clusterHosts != nil && *clusterHosts != ""
+}
+
+func compressedClusterConfig() *config.ClusterClientConfiguration {
+	compressionConfig := config.NewCompressionConfiguration().
+		WithBackend(config.ZSTD).
+		WithMinCompressionSize(64)
+	cfg := clusterConfig()
+	return cfg.WithCompressionConfiguration(compressionConfig)
+}
+
+func getClusterServerVersion(t *testing.T, client *glide.ClusterClient) string {
+	ctx := context.Background()
+	info, err := client.CustomCommand(ctx, []string{"INFO", "SERVER"})
+	if err != nil {
+		t.Skipf("Cannot get server version: %v", err)
+		return "0.0.0"
+	}
+	// INFO returns multi-value (one per primary node); parse the first one
+	var infoStr string
+	if info.IsSingleValue() {
+		infoStr = fmt.Sprintf("%v", info.SingleValue())
+	} else {
+		for _, v := range info.MultiValue() {
+			infoStr = fmt.Sprintf("%v", v)
+			break
+		}
+	}
+	for _, line := range strings.Split(infoStr, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "valkey_version:") {
+			return strings.TrimPrefix(line, "valkey_version:")
+		}
+	}
+	for _, line := range strings.Split(infoStr, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "redis_version:") {
+			return strings.TrimPrefix(line, "redis_version:")
+		}
+	}
+	return "0.0.0"
+}
+
+func versionLessThan(ver string, target string) bool {
+	verParts := strings.Split(ver, ".")
+	targetParts := strings.Split(target, ".")
+	for i := 0; i < len(targetParts) && i < len(verParts); i++ {
+		v, _ := strconv.Atoi(verParts[i])
+		tv, _ := strconv.Atoi(targetParts[i])
+		if v < tv {
+			return true
+		}
+		if v > tv {
+			return false
+		}
+	}
+	return false
+}
+
+func TestClusterScopeCompressionWritesParity(t *testing.T) {
+	if !clusterAvailable() {
+		t.Skip("No cluster endpoints configured")
+	}
+
+	// Client with compression
+	compressedClient, err := glide.NewClusterClient(compressedClusterConfig())
+	require.NoError(t, err)
+	defer compressedClient.Close()
+
+	// Client without compression (raw)
+	rawClient, err := glide.NewClusterClient(clusterConfig())
+	require.NoError(t, err)
+	defer rawClient.Close()
+
+	ctx := context.Background()
+	key := fmt.Sprintf("{scope-test}-go-cluster-compress-%d", time.Now().UnixNano())
+	largeValue := ""
+	for i := 0; i < 500; i++ {
+		largeValue += "A"
+	}
+
+	// Write with compression
+	_, err = compressedClient.Set(ctx, key, largeValue)
+	require.NoError(t, err)
+
+	// Read with same client (decompresses) — should match
+	val, err := compressedClient.Get(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, largeValue, val.Value())
+
+	// Read with raw client (no compression) — should differ
+	rawVal, err := rawClient.Get(ctx, key)
+	require.NoError(t, err)
+	assert.NotEqual(t, largeValue, rawVal.Value(),
+		"Value stored via compressed client should be compressed in Valkey (cluster)")
+
+	compressedClient.Del(ctx, []string{key})
+}
+
+func TestClusterScopeCompressionReadsParity(t *testing.T) {
+	if !clusterAvailable() {
+		t.Skip("No cluster endpoints configured")
+	}
+
+	compressedClient, err := glide.NewClusterClient(compressedClusterConfig())
+	require.NoError(t, err)
+	defer compressedClient.Close()
+
+	ctx := context.Background()
+	key := fmt.Sprintf("{scope-test}-go-cluster-read-compress-%d", time.Now().UnixNano())
+	value := ""
+	for i := 0; i < 50; i++ {
+		value += "CompressibleData_"
+	}
+
+	// Write via client (compressed)
+	compressedClient.Set(ctx, key, value)
+
+	// Read back — should decompress correctly
+	retrieved, err := compressedClient.Get(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, value, retrieved.Value())
+
+	compressedClient.Del(ctx, []string{key})
+}
+
+func TestClusterDatabaseInheritance(t *testing.T) {
+	if !clusterAvailable() {
+		t.Skip("No cluster endpoints configured")
+	}
+
+	// Create cluster client — check version first (SELECT requires Valkey 9+)
+	checkClient, err := glide.NewClusterClient(clusterConfig())
+	require.NoError(t, err)
+	ver := getClusterServerVersion(t, checkClient)
+	checkClient.Close()
+
+	if versionLessThan(ver, "9.0.0") {
+		t.Skipf("SELECT in cluster requires Valkey 9+ (got %s)", ver)
+	}
+
+	// Client configured for database 2
+	cfg := clusterConfig().WithDatabaseId(2)
+	client, err := glide.NewClusterClient(cfg)
+	require.NoError(t, err)
+	defer client.Close()
+
+	ctx := context.Background()
+	key := fmt.Sprintf("{scope-test}-go-cluster-db2-%d", time.Now().UnixNano())
+
+	// Write on database 2
+	_, err = client.Set(ctx, key, "on-db2")
+	require.NoError(t, err)
+
+	// Read back — should see the key
+	val, err := client.Get(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, "on-db2", val.Value())
+
+	// A client on database 0 should NOT see the key
+	db0Client, err := glide.NewClusterClient(clusterConfig())
+	require.NoError(t, err)
+	defer db0Client.Close()
+	db0Val, err := db0Client.Get(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, "", db0Val.Value(), "Key on db2 should not be visible on db0 (cluster)")
+
+	client.Del(ctx, []string{key})
+}
