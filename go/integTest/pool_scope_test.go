@@ -526,10 +526,7 @@ func TestScopeCompressionReadsParity(t *testing.T) {
 
 func TestScopeDatabaseInheritance(t *testing.T) {
 	// Client configured for database 2
-	cfg := config.NewClientConfiguration().
-		WithAddress(&config.NodeAddress{Host: "localhost", Port: 6379}).
-		WithRequestTimeout(5000 * time.Millisecond).
-		WithDatabaseId(2)
+	cfg := standaloneConfig().WithDatabaseId(2)
 
 	client, err := glide.NewClient(cfg)
 	require.NoError(t, err)
@@ -593,10 +590,7 @@ func TestScopeReleaseResetsDatabase(t *testing.T) {
 	scope2.Close()
 
 	// Cleanup key on db 4
-	cleanupCfg := config.NewClientConfiguration().
-		WithAddress(&config.NodeAddress{Host: "localhost", Port: 6379}).
-		WithRequestTimeout(5000 * time.Millisecond).
-		WithDatabaseId(4)
+	cleanupCfg := standaloneConfig().WithDatabaseId(4)
 	cleanupClient, _ := glide.NewClient(cleanupCfg)
 	if cleanupClient != nil {
 		cleanupClient.Del(ctx, []string{key})

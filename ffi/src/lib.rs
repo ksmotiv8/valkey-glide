@@ -1375,6 +1375,14 @@ fn create_client_internal(
         });
     }
 
+    // Register client in scope registry so scoped connections can find their
+    // parent client for compression, timeout, inflight, and CB checks.
+    #[cfg(feature = "pool-support")]
+    {
+        let client_clone = client_adapter.core.client.clone();
+        glide_core::scope::register_client(client_adapter_ptr as u64, client_clone);
+    }
+
     Ok(Arc::into_raw(client_adapter))
 }
 
@@ -2300,11 +2308,12 @@ fn apply_json_options(
 pub unsafe extern "C" fn close_client(client_adapter_ptr: *const c_void) {
     assert!(!client_adapter_ptr.is_null());
 
-    // Clean up scope pool for this client (if any)
+    // Clean up scope pool and registry for this client (if any)
     #[cfg(feature = "pool-support")]
     {
         let client_id = client_adapter_ptr as usize as u64;
         glide_core::pool::get_client_scope_pools().remove(&client_id);
+        glide_core::scope::unregister_client(client_id);
     }
 
     // This will bring the strong count down to 0 once all client requests are done.
