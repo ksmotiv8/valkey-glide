@@ -245,11 +245,10 @@ class ClientPool:
         self.close()
 
     def __del__(self):
-        if not self._closed:
-            try:
-                self.close()
-            except Exception:
-                pass
+        # Do NOT call close() from __del__. The FFI glide_pool_destroy call
+        # can race with active pubsub callbacks from the Rust side, causing
+        # segfaults. Users must call close() explicitly or use context manager.
+        pass
 
 
 class _BorrowContext:
