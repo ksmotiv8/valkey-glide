@@ -97,6 +97,14 @@ func NewClientPool(clientConfig *config.ClientConfiguration, poolConfig PoolConf
 		poolConfig.AcquireTimeout = 5 * time.Second
 	}
 
+	// Reject pubsub subscriptions — pool state reset doesn't UNSUBSCRIBE
+	if clientConfig.HasSubscription() {
+		return nil, errors.New(
+			"pool clients cannot have pubsub subscriptions configured; " +
+				"use the main client's pubsub API instead",
+		)
+	}
+
 	// Serialize connection request protobuf
 	request, err := clientConfig.ToProtobuf()
 	if err != nil {
@@ -284,6 +292,14 @@ func NewClusterClientPool(clientConfig *config.ClusterClientConfiguration, poolC
 	}
 	if poolConfig.AcquireTimeout <= 0 {
 		poolConfig.AcquireTimeout = 5 * time.Second
+	}
+
+	// Reject pubsub subscriptions — pool state reset doesn't UNSUBSCRIBE
+	if clientConfig.HasSubscription() {
+		return nil, errors.New(
+			"pool clients cannot have pubsub subscriptions configured; " +
+				"use the main client's pubsub API instead",
+		)
 	}
 
 	// Serialize connection request protobuf

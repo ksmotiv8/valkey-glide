@@ -984,3 +984,43 @@ func TestScopeReleaseResetsDatabase(t *testing.T) {
 		})
 	}
 }
+
+// TestPoolRejectsPubsubConfig verifies that pool creation fails fast when the
+// client configuration has pubsub subscriptions.
+func TestPoolRejectsPubsubConfig(t *testing.T) {
+	t.Run("standalone_with_pubsub", func(t *testing.T) {
+		cfg := standaloneConfig().
+			WithSubscriptionConfig(
+				config.NewStandaloneSubscriptionConfig().
+					WithSubscription(config.ExactChannelMode, "test-channel"),
+			)
+
+		poolCfg := glide.DefaultPoolConfig()
+		poolCfg.MaxSize = 2
+		poolCfg.MinIdle = 1
+
+		_, err := glide.NewClientPool(cfg, poolCfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "pubsub")
+	})
+
+	t.Run("cluster_with_pubsub", func(t *testing.T) {
+		if !clusterAvailable() {
+			t.Skip("No cluster endpoints configured")
+		}
+
+		cfg := clusterConfig().
+			WithSubscriptionConfig(
+				config.NewClusterSubscriptionConfig().
+					WithSubscription(config.ExactClusterChannelMode, "test-channel"),
+			)
+
+		poolCfg := glide.DefaultPoolConfig()
+		poolCfg.MaxSize = 2
+		poolCfg.MinIdle = 1
+
+		_, err := glide.NewClusterClientPool(cfg, poolCfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "pubsub")
+	})
+}

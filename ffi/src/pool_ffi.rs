@@ -11,6 +11,12 @@ use glide_core::pool::{self, ClientPool, ClientState, POOL_RUNNING, PoolConfig, 
 use glide_core::scope;
 use std::sync::atomic::Ordering as AtomicOrdering;
 
+/// Pool creation/acquire error codes
+const POOL_ERROR_INVALID_CONFIG: i64 = -1;
+#[allow(dead_code)] // used in future pool expansion (documented in FFI contract)
+const POOL_ERROR_CREATION_FAILED: i64 = -2;
+const POOL_ERROR_UNSUPPORTED_CONFIG: i64 = -3;
+
 /// Shared Tokio runtime for pool background operations (client creation, eviction).
 /// All pooled clients share this runtime rather than each getting their own.
 static POOL_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
@@ -134,7 +140,7 @@ pub unsafe extern "C" fn glide_pool_create(
                     "Cannot create pool with pubsub subscriptions in client config. \
                      Use the main client's pubsub API instead.",
                 );
-                return -3;
+                return POOL_ERROR_UNSUPPORTED_CONFIG;
             }
         }
         req.ok()
@@ -158,7 +164,7 @@ pub unsafe extern "C" fn glide_pool_create(
 
     let pool = match ClientPool::new(config) {
         Ok(p) => p,
-        Err(_) => return -1,
+        Err(_) => return POOL_ERROR_INVALID_CONFIG,
     };
 
     let pool_id = pool::register_pool(pool);

@@ -65,6 +65,14 @@ public class ClientPool implements AutoCloseable {
      */
     public static ClientPool create(ClientPoolConfig config) {
         config.validate();
+
+        // Reject pubsub subscriptions — pool state reset doesn't UNSUBSCRIBE
+        if (config.getClientConfig().getSubscriptionConfiguration() != null) {
+            throw new IllegalArgumentException(
+                    "Pool clients cannot have pubsub subscriptions configured. "
+                            + "Use the main client's pubsub API instead.");
+        }
+
         byte[] connectionRequestBytes = serializeConnectionRequest(config.getClientConfig());
 
         long poolId =

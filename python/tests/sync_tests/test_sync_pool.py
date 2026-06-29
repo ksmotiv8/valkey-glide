@@ -195,3 +195,36 @@ class TestClientPool:
             p.release(client_id)
         finally:
             p.close()
+
+
+class TestPoolPubsubRejection:
+    """Pool creation should reject configs with pubsub subscriptions."""
+
+    def test_pool_rejects_pubsub_config(self):
+        """Pool creation with pubsub subscriptions raises ValueError."""
+        config = GlideClientConfiguration(
+            addresses=[_get_standalone_address()],
+            request_timeout=5000,
+            pubsub_subscriptions=GlideClientConfiguration.PubSubSubscriptions(
+                channels_and_patterns={
+                    GlideClientConfiguration.PubSubChannelModes.Exact: {"test-channel"}
+                }
+            ),
+        )
+        with pytest.raises(ValueError, match="pubsub"):
+            ClientPool(config, PoolConfig(max_size=2, min_idle=1))
+
+    def test_pool_rejects_cluster_pubsub_config(self):
+        """Pool creation with cluster pubsub subscriptions raises ValueError."""
+        _skip_cluster_if_unavailable()
+        config = GlideClusterClientConfiguration(
+            addresses=_get_cluster_addresses(),
+            request_timeout=5000,
+            pubsub_subscriptions=GlideClusterClientConfiguration.PubSubSubscriptions(
+                channels_and_patterns={
+                    GlideClusterClientConfiguration.PubSubChannelModes.Exact: {"test-channel"}
+                }
+            ),
+        )
+        with pytest.raises(ValueError, match="pubsub"):
+            ClientPool(config, PoolConfig(max_size=2, min_idle=1))

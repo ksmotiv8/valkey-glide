@@ -287,4 +287,35 @@ public class ClientPoolIntegrationTest {
         pool.close();
         System.out.println("testPoolTimeoutOnExhaustion PASSED (cluster=" + clusterMode + ")");
     }
+
+    @org.junit.jupiter.api.Test
+    public void testPoolRejectsPubsubConfig() {
+        // Standalone config with pubsub subscription should be rejected
+        glide.api.models.configuration.StandaloneSubscriptionConfiguration subConfig =
+                glide.api.models.configuration.StandaloneSubscriptionConfiguration.builder()
+                        .subscription(
+                                glide.api.models.configuration.StandaloneSubscriptionConfiguration.PubSubChannelMode
+                                        .EXACT,
+                                glide.api.models.GlideString.gs("test-channel"))
+                        .build();
+
+        assumeTrue(standaloneAvailable(), "No standalone endpoints configured");
+        String[] parts = STANDALONE_HOSTS[0].split(":");
+
+        GlideClientConfiguration clientConfig =
+                GlideClientConfiguration.builder()
+                        .address(NodeAddress.builder().host(parts[0]).port(Integer.parseInt(parts[1])).build())
+                        .requestTimeout(5000)
+                        .subscriptionConfiguration(subConfig)
+                        .build();
+
+        ClientPoolConfig poolCfg =
+                ClientPoolConfig.builder().maxSize(2).minIdle(1).clientConfig(clientConfig).build();
+
+        IllegalArgumentException ex =
+                assertThrows(IllegalArgumentException.class, () -> ClientPool.create(poolCfg));
+        assertTrue(
+                ex.getMessage().contains("pubsub"), "Error should mention pubsub: " + ex.getMessage());
+        System.out.println("testPoolRejectsPubsubConfig PASSED");
+    }
 }
