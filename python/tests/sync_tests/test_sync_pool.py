@@ -3,6 +3,9 @@
 """
 Integration tests for Feature 1: Client-Instance Pooling (Python sync client).
 Requires a Valkey server (uses test infrastructure endpoints).
+
+Parameterized over cluster_mode (True/False) to ensure both standalone and
+cluster deployments behave identically.
 """
 
 import threading
@@ -10,112 +13,176 @@ import time
 import uuid
 
 import pytest
-from glide_shared.config import GlideClientConfiguration, NodeAddress
+from glide_shared.config import (
+    GlideClientConfiguration,
+    GlideClusterClientConfiguration,
+    NodeAddress,
+)
 from glide_sync.client_pool import ClientPool, PoolConfig
 
+from tests.utils.utils import get_cluster_addresses as _get_cluster_addresses
+from tests.utils.utils import get_standalone_address as _get_standalone_address
 
-def get_standalone_config(request) -> GlideClientConfiguration:
-    """Build a GlideClientConfiguration using the test server endpoints."""
-    # The test infrastructure passes endpoints via pytest options
-    host = request.config.getoption("--host", default="localhost")
-    port = int(request.config.getoption("--port", default="6379"))
-    return GlideClientConfiguration(
-        addresses=[NodeAddress(host, port)],
-        request_timeout=5000,
-    )
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def _skip_cluster_if_unavailable():
+    """Skip test if no cluster endpoints are configured."""
+    try:
+        cluster = pytest.valkey_cluster  # type: ignore[attr-defined]
+        if cluster is None or len(cluster.nodes_addr) == 0:
+            pytest.skip("No cluster endpoints available")
+    except AttributeError:
+        pytest.skip("No cluster endpoints available (pytest.valkey_cluster not set)")
+
+
+def _get_pool_client_config(cluster_mode: bool):
+    """Build a client configuration for standalone or cluster mode."""
+    if cluster_mode:
+        _skip_cluster_if_unavailable()
+        return GlideClusterClientConfiguration(
+            addresses=_get_cluster_addresses(),
+            request_timeout=5000,
+        )
+    else:
+        return GlideClientConfiguration(
+            addresses=[_get_standalone_address()],
+            request_timeout=5000,
+        )
+
+
+def _make_key(cluster_mode: bool, prefix: str) -> str:
+    """Generate a key with hash tag for cluster mode to avoid cross-slot issues."""
+    uid = uuid.uuid4().hex[:8]
+    if cluster_mode:
+        return f"{{pool-test}}-{prefix}-{uid}"
+    return f"{prefix}-{uid}"
 
 
 class TestClientPool:
     """Tests for the ClientPool class backed by glide-core::pool via FFI."""
 
-    @pytest.fixture
-    def pool(self, request):
-        """Create a pool for each test, close on teardown."""
-        config = get_standalone_config(request)
-        pool_config = PoolConfig(max_size=5, min_idle=1, acquire_timeout_s=10.0)
-        p = ClientPool(config, pool_config)
-        # Wait for min_idle warmup
-        time.sleep(3)
-        yield p
-        p.close()
-
-    def test_pool_create_and_metrics(self, pool):
+    @pytest.mark.parametrize("cluster_mode", [True, False])
+    def test_pool_create_and_metrics(self, cluster_mode):
         """Pool creates successfully and reports metrics."""
-        metrics = pool.metrics()
-        assert metrics["idle"] >= 1, f"Expected at least 1 idle, got {metrics}"
-        assert metrics["total"] >= 1, f"Expected total >= 1, got {metrics}"
-        assert not pool.is_closed
+        config = _get_pool_client_config(cluster_mode)
+        pool = ClientPool(
+            config, PoolConfig(max_size=5, min_idle=1, acquire_timeout_s=10.0)
+        )
+        time.sleep(3)
 
-    def test_pool_borrow_and_commands(self, pool):
+        try:
+            metrics = pool.metrics()
+            assert metrics["idle"] >= 1, f"Expected at least 1 idle, got {metrics}"
+            assert metrics["total"] >= 1, f"Expected total >= 1, got {metrics}"
+            assert not pool.is_closed
+        finally:
+            pool.close()
+
+    @pytest.mark.parametrize("cluster_mode", [True, False])
+    def test_pool_borrow_and_commands(self, cluster_mode):
         """Borrow a client, run commands, auto-release."""
-        key = f"pool-py-test-{uuid.uuid4()}"
-        with pool.borrow() as client:
-            client.set(key, "hello")
-            result = client.get(key)
-            assert result == b"hello" or result == "hello"
-            client.delete([key])
+        config = _get_pool_client_config(cluster_mode)
+        pool = ClientPool(
+            config, PoolConfig(max_size=5, min_idle=1, acquire_timeout_s=10.0)
+        )
+        time.sleep(3)
 
-    def test_pool_reuse(self, pool):
+        try:
+            key = _make_key(cluster_mode, "borrow")
+            with pool.borrow() as client:
+                client.set(key, "hello")
+                result = client.get(key)
+                assert result == b"hello" or result == "hello"
+                client.delete([key])
+        finally:
+            pool.close()
+
+    @pytest.mark.parametrize("cluster_mode", [True, False])
+    def test_pool_reuse(self, cluster_mode):
         """LIFO reuse: same client_id returned after release."""
-        id1 = pool.acquire()
-        pool.release(id1)
-        time.sleep(0.1)
-        id2 = pool.acquire()
-        pool.release(id2)
-        assert id1 == id2, f"Expected LIFO reuse: {id1} != {id2}"
+        config = _get_pool_client_config(cluster_mode)
+        pool = ClientPool(
+            config, PoolConfig(max_size=5, min_idle=1, acquire_timeout_s=10.0)
+        )
+        time.sleep(3)
 
-    def test_pool_close_rejects_acquire(self, request):
+        try:
+            id1 = pool.acquire()
+            pool.release(id1)
+            time.sleep(0.1)
+            id2 = pool.acquire()
+            pool.release(id2)
+            assert id1 == id2, f"Expected LIFO reuse: {id1} != {id2}"
+        finally:
+            pool.close()
+
+    @pytest.mark.parametrize("cluster_mode", [True, False])
+    def test_pool_close_rejects_acquire(self, cluster_mode):
         """Closed pool raises on acquire."""
-        config = get_standalone_config(request)
+        config = _get_pool_client_config(cluster_mode)
         p = ClientPool(config, PoolConfig(max_size=2, min_idle=0))
         p.close()
         with pytest.raises(RuntimeError, match="closed"):
             p.acquire()
 
-    def test_pool_concurrent_access(self, pool):
+    @pytest.mark.parametrize("cluster_mode", [True, False])
+    def test_pool_concurrent_access(self, cluster_mode):
         """Multiple threads can borrow and use clients concurrently."""
-        num_threads = 4
-        results = [None] * num_threads
-        errors = []
+        config = _get_pool_client_config(cluster_mode)
+        pool = ClientPool(
+            config, PoolConfig(max_size=5, min_idle=1, acquire_timeout_s=10.0)
+        )
+        time.sleep(3)
 
-        def worker(idx):
-            try:
-                with pool.borrow() as client:
-                    key = f"concurrent-py-{idx}-{uuid.uuid4()}"
-                    client.set(key, f"thread-{idx}")
-                    val = client.get(key)
-                    assert val == f"thread-{idx}".encode() or val == f"thread-{idx}"
-                    client.delete([key])
-                    results[idx] = True
-            except Exception as e:
-                errors.append((idx, e))
-                results[idx] = False
+        try:
+            num_threads = 4
+            results = [None] * num_threads
+            errors = []
 
-        threads = [
-            threading.Thread(target=worker, args=(i,)) for i in range(num_threads)
-        ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=30)
+            def worker(idx):
+                try:
+                    with pool.borrow() as client:
+                        key = _make_key(cluster_mode, f"concurrent-{idx}")
+                        client.set(key, f"thread-{idx}")
+                        val = client.get(key)
+                        assert val == f"thread-{idx}".encode() or val == f"thread-{idx}"
+                        client.delete([key])
+                        results[idx] = True
+                except Exception as e:
+                    errors.append((idx, e))
+                    results[idx] = False
 
-        assert not errors, f"Thread errors: {errors}"
-        assert all(results), f"Not all threads succeeded: {results}"
+            threads = [
+                threading.Thread(target=worker, args=(i,)) for i in range(num_threads)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
 
-    def test_pool_timeout_on_exhaustion(self, request):
+            assert not errors, f"Thread errors: {errors}"
+            assert all(results), f"Not all threads succeeded: {results}"
+        finally:
+            pool.close()
+
+    @pytest.mark.parametrize("cluster_mode", [True, False])
+    def test_pool_timeout_on_exhaustion(self, cluster_mode):
         """Pool raises TimeoutError when exhausted within timeout."""
-        config = get_standalone_config(request)
+        config = _get_pool_client_config(cluster_mode)
         p = ClientPool(
             config, PoolConfig(max_size=1, min_idle=1, acquire_timeout_s=1.0)
         )
         time.sleep(3)  # warmup
 
-        # Acquire the only client
-        client_id = p.acquire()
+        try:
+            # Acquire the only client
+            client_id = p.acquire()
 
-        # Second acquire should time out
-        with pytest.raises(TimeoutError):
-            p.acquire(timeout=0.5)
+            # Second acquire should time out
+            with pytest.raises(TimeoutError):
+                p.acquire(timeout=0.5)
 
-        p.release(client_id)
-        p.close()
+            p.release(client_id)
+        finally:
+            p.close()

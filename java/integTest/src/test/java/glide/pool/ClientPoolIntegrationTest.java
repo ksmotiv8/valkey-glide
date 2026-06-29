@@ -1,44 +1,99 @@
 /** Copyright Valkey GLIDE Project Contributors - SPDX Identifier: Apache-2.0 */
 package glide.pool;
 
+import static glide.TestConfiguration.CLUSTER_HOSTS;
+import static glide.TestConfiguration.STANDALONE_HOSTS;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import glide.TestConfiguration;
 import glide.api.models.configuration.GlideClientConfiguration;
+import glide.api.models.configuration.GlideClusterClientConfiguration;
 import glide.api.models.configuration.NodeAddress;
 import glide.api.models.pool.ClientPool;
 import glide.api.models.pool.ClientPoolConfig;
 import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Integration tests for Feature 1: Client-Instance Pooling. Requires a Valkey server (uses test
  * infrastructure endpoints).
+ *
+ * <p>Tests are parameterized over cluster mode (true/false) to ensure both standalone and cluster
+ * deployments behave identically.
  */
 public class ClientPoolIntegrationTest {
 
-    private ClientPoolConfig poolConfig() {
-        String hostPort = TestConfiguration.STANDALONE_HOSTS[0];
-        String[] parts = hostPort.split(":");
-        String host = parts[0];
-        int port = Integer.parseInt(parts[1]);
-        return ClientPoolConfig.builder()
-                .maxSize(3)
-                .minIdle(1)
-                .acquireTimeout(Duration.ofSeconds(10))
-                .clientConfig(
-                        GlideClientConfiguration.builder()
-                                .address(NodeAddress.builder().host(host).port(port).build())
-                                .requestTimeout(5000)
-                                .build())
-                .build();
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Helpers
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    private static boolean standaloneAvailable() {
+        return STANDALONE_HOSTS.length > 0 && !STANDALONE_HOSTS[0].isEmpty();
     }
 
-    @Test
-    public void testPoolCreateAcquireRelease() throws Exception {
-        ClientPool pool = ClientPool.create(poolConfig());
+    private static boolean clusterAvailable() {
+        return CLUSTER_HOSTS.length > 0 && !CLUSTER_HOSTS[0].isEmpty();
+    }
+
+    private static void assumeMode(boolean clusterMode) {
+        if (clusterMode) {
+            assumeTrue(clusterAvailable(), "No cluster endpoints configured");
+        } else {
+            assumeTrue(standaloneAvailable(), "No standalone endpoints configured");
+        }
+    }
+
+    /** Generate a key with hash tag when in cluster mode to ensure slot consistency. */
+    private static String testKey(boolean clusterMode, String prefix) {
+        String id = UUID.randomUUID().toString().substring(0, 8);
+        return clusterMode ? "{pool-test}-" + prefix + "-" + id : prefix + "-" + id;
+    }
+
+    private ClientPoolConfig poolConfig(boolean clusterMode) {
+        assumeMode(clusterMode);
+        if (clusterMode) {
+            GlideClusterClientConfiguration.GlideClusterClientConfigurationBuilder<?, ?> builder =
+                    GlideClusterClientConfiguration.builder();
+            for (String host : CLUSTER_HOSTS) {
+                String[] parts = host.split(":");
+                builder.address(
+                        NodeAddress.builder()
+                                .host(parts[0])
+                                .port(Integer.parseInt(parts[1]))
+                                .build());
+            }
+            builder.requestTimeout(5000);
+            return ClientPoolConfig.builder()
+                    .maxSize(3)
+                    .minIdle(1)
+                    .acquireTimeout(Duration.ofSeconds(10))
+                    .clientConfig(builder.build())
+                    .build();
+        } else {
+            String[] parts = STANDALONE_HOSTS[0].split(":");
+            String host = parts[0];
+            int port = Integer.parseInt(parts[1]);
+            return ClientPoolConfig.builder()
+                    .maxSize(3)
+                    .minIdle(1)
+                    .acquireTimeout(Duration.ofSeconds(10))
+                    .clientConfig(
+                            GlideClientConfiguration.builder()
+                                    .address(NodeAddress.builder().host(host).port(port).build())
+                                    .requestTimeout(5000)
+                                    .build())
+                    .build();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testPoolCreateAcquireRelease(boolean clusterMode) throws Exception {
+        ClientPool pool = ClientPool.create(poolConfig(clusterMode));
         Thread.sleep(3000); // Wait for min_idle warmup
 
         assertTrue(pool.getIdleCount() >= 1, "Should have at least 1 idle client");
@@ -49,19 +104,20 @@ public class ClientPoolIntegrationTest {
             assertNotNull(client);
             assertTrue(client.getClientId() > 0, "client_id should be positive");
 
-            String key = "pool-test-" + UUID.randomUUID();
+            String key = testKey(clusterMode, "acquire-release");
             client.set(key, "hello").get(5, TimeUnit.SECONDS);
             assertEquals("hello", client.get(key).get(5, TimeUnit.SECONDS));
             client.del(new String[] {key}).get(5, TimeUnit.SECONDS);
         } // auto-released back to pool
 
         pool.close();
-        System.out.println("testPoolCreateAcquireRelease PASSED");
+        System.out.println("testPoolCreateAcquireRelease PASSED (cluster=" + clusterMode + ")");
     }
 
-    @Test
-    public void testPoolReuse() throws Exception {
-        ClientPool pool = ClientPool.create(poolConfig());
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testPoolReuse(boolean clusterMode) throws Exception {
+        ClientPool pool = ClientPool.create(poolConfig(clusterMode));
         Thread.sleep(3000);
 
         glide.api.models.pool.PooledGlideClient c1 = pool.acquire().get(10, TimeUnit.SECONDS);
@@ -75,12 +131,13 @@ public class ClientPoolIntegrationTest {
         c2.close();
 
         pool.close();
-        System.out.println("testPoolReuse PASSED");
+        System.out.println("testPoolReuse PASSED (cluster=" + clusterMode + ")");
     }
 
-    @Test
-    public void testPoolMetrics() throws Exception {
-        ClientPool pool = ClientPool.create(poolConfig());
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testPoolMetrics(boolean clusterMode) throws Exception {
+        ClientPool pool = ClientPool.create(poolConfig(clusterMode));
         Thread.sleep(3000);
 
         assertTrue(pool.getIdleCount() >= 1);
@@ -98,23 +155,25 @@ public class ClientPoolIntegrationTest {
 
         assertTrue(pool.getIdleCount() >= 1, "After release, idle should be >= 1");
         pool.close();
-        System.out.println("testPoolMetrics PASSED");
+        System.out.println("testPoolMetrics PASSED (cluster=" + clusterMode + ")");
     }
 
-    @Test
-    public void testPoolCloseRejectsAcquire() throws Exception {
-        ClientPool pool = ClientPool.create(poolConfig());
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testPoolCloseRejectsAcquire(boolean clusterMode) throws Exception {
+        ClientPool pool = ClientPool.create(poolConfig(clusterMode));
         Thread.sleep(2000);
 
         pool.close();
 
         assertThrows(Exception.class, () -> pool.acquire().get(2, TimeUnit.SECONDS));
-        System.out.println("testPoolCloseRejectsAcquire PASSED");
+        System.out.println("testPoolCloseRejectsAcquire PASSED (cluster=" + clusterMode + ")");
     }
 
-    @Test
-    public void testPoolConcurrentAccess() throws Exception {
-        ClientPool pool = ClientPool.create(poolConfig());
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testPoolConcurrentAccess(boolean clusterMode) throws Exception {
+        ClientPool pool = ClientPool.create(poolConfig(clusterMode));
         Thread.sleep(3000);
 
         int numThreads = 4;
@@ -130,7 +189,7 @@ public class ClientPoolIntegrationTest {
                             () -> {
                                 try (glide.api.models.pool.PooledGlideClient client =
                                         pool.acquire().get(15, TimeUnit.SECONDS)) {
-                                    String key = "pool-concurrent-" + threadIdx + "-" + UUID.randomUUID();
+                                    String key = testKey(clusterMode, "concurrent-" + threadIdx);
                                     client.set(key, "thread-" + threadIdx).get(5, TimeUnit.SECONDS);
                                     String val = client.get(key).get(5, TimeUnit.SECONDS);
                                     assertEquals("thread-" + threadIdx, val);
@@ -148,31 +207,57 @@ public class ClientPoolIntegrationTest {
 
         assertTrue(latch.await(30, TimeUnit.SECONDS), "All threads should finish");
         assertEquals(
-                numThreads, successCount.get(), "All threads should succeed. Errors: " + errorCount.get());
+                numThreads,
+                successCount.get(),
+                "All threads should succeed. Errors: " + errorCount.get());
 
         pool.close();
-        System.out.println("testPoolConcurrentAccess PASSED");
+        System.out.println("testPoolConcurrentAccess PASSED (cluster=" + clusterMode + ")");
     }
 
-    @Test
-    public void testPoolTimeoutOnExhaustion() throws Exception {
-        ClientPoolConfig exhaustConfig =
-                ClientPoolConfig.builder()
-                        .maxSize(1)
-                        .minIdle(1)
-                        .acquireTimeout(Duration.ofSeconds(10))
-                        .clientConfig(
-                                GlideClientConfiguration.builder()
-                                        .address(
-                                                NodeAddress.builder()
-                                                        .host(TestConfiguration.STANDALONE_HOSTS[0].split(":")[0])
-                                                        .port(
-                                                                Integer.parseInt(
-                                                                        TestConfiguration.STANDALONE_HOSTS[0].split(":")[1]))
-                                                        .build())
-                                        .requestTimeout(5000)
-                                        .build())
-                        .build();
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testPoolTimeoutOnExhaustion(boolean clusterMode) throws Exception {
+        assumeMode(clusterMode);
+        ClientPoolConfig exhaustConfig;
+        if (clusterMode) {
+            GlideClusterClientConfiguration.GlideClusterClientConfigurationBuilder<?, ?> builder =
+                    GlideClusterClientConfiguration.builder();
+            for (String host : CLUSTER_HOSTS) {
+                String[] parts = host.split(":");
+                builder.address(
+                        NodeAddress.builder()
+                                .host(parts[0])
+                                .port(Integer.parseInt(parts[1]))
+                                .build());
+            }
+            builder.requestTimeout(5000);
+            exhaustConfig =
+                    ClientPoolConfig.builder()
+                            .maxSize(1)
+                            .minIdle(1)
+                            .acquireTimeout(Duration.ofSeconds(10))
+                            .clientConfig(builder.build())
+                            .build();
+        } else {
+            exhaustConfig =
+                    ClientPoolConfig.builder()
+                            .maxSize(1)
+                            .minIdle(1)
+                            .acquireTimeout(Duration.ofSeconds(10))
+                            .clientConfig(
+                                    GlideClientConfiguration.builder()
+                                            .address(
+                                                    NodeAddress.builder()
+                                                            .host(STANDALONE_HOSTS[0].split(":")[0])
+                                                            .port(
+                                                                    Integer.parseInt(
+                                                                            STANDALONE_HOSTS[0].split(":")[1]))
+                                                            .build())
+                                            .requestTimeout(5000)
+                                            .build())
+                            .build();
+        }
 
         ClientPool pool = ClientPool.create(exhaustConfig);
         Thread.sleep(3000);
@@ -193,6 +278,6 @@ public class ClientPoolIntegrationTest {
 
         held.close();
         pool.close();
-        System.out.println("testPoolTimeoutOnExhaustion PASSED");
+        System.out.println("testPoolTimeoutOnExhaustion PASSED (cluster=" + clusterMode + ")");
     }
 }

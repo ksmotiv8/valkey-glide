@@ -5,7 +5,8 @@ Integration tests for Feature 1: Client-Instance Pooling (Python async).
 Mirrors sync test_sync_pool.py and Java ClientPoolIntegrationTest for
 cross-language parity.
 
-Requires a running Valkey server (standalone).
+Parameterized over cluster_mode (True/False) to ensure both standalone and
+cluster deployments behave identically.
 """
 
 import asyncio
@@ -15,123 +16,175 @@ import pytest
 from glide import (
     AsyncClientPool,
     GlideClientConfiguration,
+    GlideClusterClientConfiguration,
     PoolConfig,
 )
 
+from tests.utils.utils import get_cluster_addresses as _get_cluster_addresses
 from tests.utils.utils import get_standalone_address as _get_standalone_address
 
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.fixture
-def pool_config():
-    """Pool config for a standalone server."""
-    return GlideClientConfiguration(
-        addresses=[_get_standalone_address()],
-        request_timeout=5000,
-    )
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def _skip_cluster_if_unavailable():
+    """Skip test if no cluster endpoints are configured."""
+    try:
+        cluster = pytest.valkey_cluster  # type: ignore[attr-defined]
+        if cluster is None or len(cluster.nodes_addr) == 0:
+            pytest.skip("No cluster endpoints available")
+    except AttributeError:
+        pytest.skip("No cluster endpoints available (pytest.valkey_cluster not set)")
+
+
+def _get_pool_client_config(cluster_mode: bool):
+    """Build a client configuration for standalone or cluster mode."""
+    if cluster_mode:
+        _skip_cluster_if_unavailable()
+        return GlideClusterClientConfiguration(
+            addresses=_get_cluster_addresses(),
+            request_timeout=5000,
+        )
+    else:
+        return GlideClientConfiguration(
+            addresses=[_get_standalone_address()],
+            request_timeout=5000,
+        )
+
+
+def _make_key(cluster_mode: bool, prefix: str) -> str:
+    """Generate a key with hash tag for cluster mode to avoid cross-slot issues."""
+    uid = uuid.uuid4().hex[:8]
+    if cluster_mode:
+        return f"{{pool-test}}-{prefix}-{uid}"
+    return f"{prefix}-{uid}"
 
 
 class TestAsyncClientPool:
     """Async pool lifecycle tests."""
 
-    async def test_pool_create_and_metrics(self, pool_config):
+    @pytest.mark.parametrize("cluster_mode", [True, False])
+    async def test_pool_create_and_metrics(self, cluster_mode):
         """Create pool, acquire client, execute commands, release, close."""
-        pool = AsyncClientPool(pool_config, PoolConfig(max_size=3, min_idle=1))
+        config = _get_pool_client_config(cluster_mode)
+        pool = AsyncClientPool(config, PoolConfig(max_size=3, min_idle=1))
         await asyncio.sleep(3)  # Wait for pool warmup
 
-        assert pool.idle_count >= 1
+        try:
+            assert pool.idle_count >= 1
 
-        async with pool.borrow() as client:
-            key = f"async-pool-{uuid.uuid4().hex[:8]}"
-            await client.set(key, "hello")
-            val = await client.get(key)
-            assert val == b"hello"
-            await client.delete([key])
+            async with pool.borrow() as client:
+                key = _make_key(cluster_mode, "metrics")
+                await client.set(key, "hello")
+                val = await client.get(key)
+                assert val == b"hello"
+                await client.delete([key])
+        finally:
+            pool.close()
 
-        pool.close()
-
-    async def test_pool_borrow_and_commands(self, pool_config):
+    @pytest.mark.parametrize("cluster_mode", [True, False])
+    async def test_pool_borrow_and_commands(self, cluster_mode):
         """Borrow client from pool, execute commands, auto-release."""
-        pool = AsyncClientPool(pool_config, PoolConfig(max_size=3, min_idle=1))
+        config = _get_pool_client_config(cluster_mode)
+        pool = AsyncClientPool(config, PoolConfig(max_size=3, min_idle=1))
         await asyncio.sleep(3)  # Wait for pool warmup
 
-        async with pool.borrow() as client:
-            key = f"async-pool-borrow-{uuid.uuid4().hex[:8]}"
-            await client.set(key, "world")
-            val = await client.get(key)
-            assert val == b"world"
-            await client.delete([key])
+        try:
+            async with pool.borrow() as client:
+                key = _make_key(cluster_mode, "borrow")
+                await client.set(key, "world")
+                val = await client.get(key)
+                assert val == b"world"
+                await client.delete([key])
+        finally:
+            pool.close()
 
-        pool.close()
-
-    async def test_pool_reuse(self, pool_config):
+    @pytest.mark.parametrize("cluster_mode", [True, False])
+    async def test_pool_reuse(self, cluster_mode):
         """LIFO: same client_id returned after release."""
-        pool = AsyncClientPool(pool_config, PoolConfig(max_size=3, min_idle=1))
+        config = _get_pool_client_config(cluster_mode)
+        pool = AsyncClientPool(config, PoolConfig(max_size=3, min_idle=1))
         await asyncio.sleep(3)  # Wait for pool warmup
 
-        id1 = await pool.acquire()
-        pool.release(id1)
-        await asyncio.sleep(0.1)
+        try:
+            id1 = await pool.acquire()
+            pool.release(id1)
+            await asyncio.sleep(0.1)
 
-        id2 = await pool.acquire()
-        pool.release(id2)
+            id2 = await pool.acquire()
+            pool.release(id2)
 
-        assert id1 == id2
-        pool.close()
+            assert id1 == id2
+        finally:
+            pool.close()
 
-    async def test_pool_metrics(self, pool_config):
+    @pytest.mark.parametrize("cluster_mode", [True, False])
+    async def test_pool_metrics(self, cluster_mode):
         """Metrics reflect pool state."""
-        pool = AsyncClientPool(pool_config, PoolConfig(max_size=3, min_idle=2))
+        config = _get_pool_client_config(cluster_mode)
+        pool = AsyncClientPool(config, PoolConfig(max_size=3, min_idle=2))
         await asyncio.sleep(3)  # Wait for pool warmup
 
-        assert pool.idle_count >= 1
-        assert pool.total_count >= 1
+        try:
+            assert pool.idle_count >= 1
+            assert pool.total_count >= 1
+        finally:
+            pool.close()
 
-        pool.close()
-
-    async def test_pool_timeout_on_exhaustion(self, pool_config):
+    @pytest.mark.parametrize("cluster_mode", [True, False])
+    async def test_pool_timeout_on_exhaustion(self, cluster_mode):
         """Timeout when pool is exhausted."""
-        pool = AsyncClientPool(pool_config, PoolConfig(max_size=1, min_idle=1))
+        config = _get_pool_client_config(cluster_mode)
+        pool = AsyncClientPool(config, PoolConfig(max_size=1, min_idle=1))
         await asyncio.sleep(3)  # Wait for pool warmup
 
-        # Acquire the only client
-        client_id = await pool.acquire()
+        try:
+            # Acquire the only client
+            client_id = await pool.acquire()
 
-        # Second acquire should timeout
-        with pytest.raises(TimeoutError):
-            await pool.acquire(timeout=0.5)
+            # Second acquire should timeout
+            with pytest.raises(TimeoutError):
+                await pool.acquire(timeout=0.5)
 
-        pool.release(client_id)
-        pool.close()
+            pool.release(client_id)
+        finally:
+            pool.close()
 
-    async def test_pool_concurrent_access(self, pool_config):
+    @pytest.mark.parametrize("cluster_mode", [True, False])
+    async def test_pool_concurrent_access(self, cluster_mode):
         """Multiple tasks borrow/release concurrently."""
-        pool = AsyncClientPool(pool_config, PoolConfig(max_size=4, min_idle=4))
+        config = _get_pool_client_config(cluster_mode)
+        pool = AsyncClientPool(config, PoolConfig(max_size=4, min_idle=4))
         await asyncio.sleep(3)  # Wait for pool warmup
 
-        errors = []
+        try:
+            errors = []
 
-        async def worker(task_idx):
-            try:
-                async with pool.borrow() as client:
-                    key = f"async-pool-concurrent-{task_idx}-{uuid.uuid4().hex[:6]}"
-                    await client.set(key, f"task-{task_idx}")
-                    val = await client.get(key)
-                    assert val == f"task-{task_idx}".encode()
-                    await client.delete([key])
-            except Exception as e:
-                errors.append(e)
+            async def worker(task_idx):
+                try:
+                    async with pool.borrow() as client:
+                        key = _make_key(cluster_mode, f"concurrent-{task_idx}")
+                        await client.set(key, f"task-{task_idx}")
+                        val = await client.get(key)
+                        assert val == f"task-{task_idx}".encode()
+                        await client.delete([key])
+                except Exception as e:
+                    errors.append(e)
 
-        tasks = [asyncio.create_task(worker(i)) for i in range(8)]
-        await asyncio.gather(*tasks)
+            tasks = [asyncio.create_task(worker(i)) for i in range(8)]
+            await asyncio.gather(*tasks)
 
-        assert not errors, f"Worker errors: {errors}"
-        pool.close()
+            assert not errors, f"Worker errors: {errors}"
+        finally:
+            pool.close()
 
-    async def test_pool_close_rejects_acquire(self, pool_config):
+    @pytest.mark.parametrize("cluster_mode", [True, False])
+    async def test_pool_close_rejects_acquire(self, cluster_mode):
         """Closed pool rejects acquire."""
-        pool = AsyncClientPool(pool_config, PoolConfig(max_size=2, min_idle=1))
+        config = _get_pool_client_config(cluster_mode)
+        pool = AsyncClientPool(config, PoolConfig(max_size=2, min_idle=1))
         await asyncio.sleep(3)  # Wait for pool warmup
 
         pool.close()
