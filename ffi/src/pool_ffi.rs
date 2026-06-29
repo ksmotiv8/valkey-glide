@@ -302,86 +302,83 @@ pub extern "C" fn glide_pool_acquire_blocking(pool_id: u64, timeout_ms: u64) -> 
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
 
-    // Get the condvar handle (need to access it without holding the TokioMutex)
-    let notify = {
-        let rt = get_pool_runtime();
-        rt.block_on(async {
-            let pool = pool_arc.lock().await;
-            pool.release_notify.clone()
-        })
+    // Get the condvar handle (try_lock is synchronous — no runtime needed)
+    let notify = loop {
+        match pool_arc.try_lock() {
+            Ok(pool) => break pool.release_notify.clone(),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(1)),
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = GlideOpenTelemetry::record_pool_miss();
+            return -1;
+        }
     };
 
     loop {
-        // Try to acquire
-        let result = {
-            let rt = get_pool_runtime();
-            rt.block_on(async {
-                match pool_arc.try_lock() {
-                    Ok(mut pool) => {
-                        let r = pool.try_acquire();
-                        if r >= 0 {
-                            let _ = GlideOpenTelemetry::record_pool_hit();
-                        }
-                        // Trigger background creation if needed
-                        if r < 0 && pool.should_create() {
-                            pool.total_count.fetch_add(1, AtomicOrdering::AcqRel);
-                            let pool_clone = pool_arc.clone();
-                            let bytes = pool.config.connection_request.clone();
-                            drop(pool);
-                            std::thread::spawn(move || {
-                                let pre_cid = glide_core::pool::allocate_client_id() as usize;
-                                let bg_ct = get_pool_client_types()
-                                    .get(&pool_id)
-                                    .map(|e| e.value().clone())
-                                    .unwrap_or(ClientType::SyncClient);
-                                match create_pool_client(&bytes, bg_ct, pre_cid) {
-                                    Ok((adapter_ptr, client)) => {
-                                        let rt = get_pool_runtime();
-                                        rt.block_on(async {
-                                            let mut p = pool_clone.lock().await;
-                                            if p.state.load(AtomicOrdering::Acquire) != POOL_RUNNING
-                                            {
-                                                p.total_count.fetch_sub(1, AtomicOrdering::AcqRel);
-                                                return;
-                                            }
-                                            let cid = p.next_id();
-                                            let entry = PooledClient {
-                                                client_id: cid,
-                                                client: client.clone(),
-                                                created_at: std::time::Instant::now(),
-                                                last_idle_at: std::time::Instant::now(),
-                                                borrowed_at: None,
-                                                state: ClientState::Idle,
-                                            };
-                                            p.idle.push_back(entry);
-                                            get_pool_clients().insert(
-                                                cid,
-                                                PoolClientEntry {
-                                                    adapter_ptr,
-                                                    client,
-                                                    created_at: std::time::Instant::now(),
-                                                },
-                                            );
-                                            // Notify waiters that a new client is available
-                                            let (_, cv) = &*p.release_notify;
-                                            cv.notify_one();
-                                        });
-                                    }
-                                    Err(_) => {
-                                        let rt = get_pool_runtime();
-                                        rt.block_on(async {
-                                            let p = pool_clone.lock().await;
-                                            p.total_count.fetch_sub(1, AtomicOrdering::AcqRel);
-                                        });
-                                    }
-                                }
-                            });
-                        }
-                        r
-                    }
-                    Err(_) => -1,
+        // Try to acquire (try_lock is synchronous on TokioMutex — no runtime needed)
+        let result = match pool_arc.try_lock() {
+            Ok(mut pool) => {
+                let r = pool.try_acquire();
+                if r >= 0 {
+                    let _ = GlideOpenTelemetry::record_pool_hit();
                 }
-            })
+                // Trigger background creation if needed
+                if r < 0 && pool.should_create() {
+                    pool.total_count.fetch_add(1, AtomicOrdering::AcqRel);
+                    let pool_clone = pool_arc.clone();
+                    let bytes = pool.config.connection_request.clone();
+                    drop(pool);
+                    std::thread::spawn(move || {
+                        let pre_cid = glide_core::pool::allocate_client_id() as usize;
+                        let bg_ct = get_pool_client_types()
+                            .get(&pool_id)
+                            .map(|e| e.value().clone())
+                            .unwrap_or(ClientType::SyncClient);
+                        match create_pool_client(&bytes, bg_ct, pre_cid) {
+                            Ok((adapter_ptr, client)) => {
+                                let rt = get_pool_runtime();
+                                rt.block_on(async {
+                                    let mut p = pool_clone.lock().await;
+                                    if p.state.load(AtomicOrdering::Acquire) != POOL_RUNNING {
+                                        p.total_count.fetch_sub(1, AtomicOrdering::AcqRel);
+                                        return;
+                                    }
+                                    let cid = p.next_id();
+                                    let entry = PooledClient {
+                                        client_id: cid,
+                                        client: client.clone(),
+                                        created_at: std::time::Instant::now(),
+                                        last_idle_at: std::time::Instant::now(),
+                                        borrowed_at: None,
+                                        state: ClientState::Idle,
+                                    };
+                                    p.idle.push_back(entry);
+                                    get_pool_clients().insert(
+                                        cid,
+                                        PoolClientEntry {
+                                            adapter_ptr,
+                                            client,
+                                            created_at: std::time::Instant::now(),
+                                        },
+                                    );
+                                    // Notify waiters that a new client is available
+                                    let (_, cv) = &*p.release_notify;
+                                    cv.notify_one();
+                                });
+                            }
+                            Err(_) => {
+                                let rt = get_pool_runtime();
+                                rt.block_on(async {
+                                    let p = pool_clone.lock().await;
+                                    p.total_count.fetch_sub(1, AtomicOrdering::AcqRel);
+                                });
+                            }
+                        }
+                    });
+                }
+                r
+            }
+            Err(_) => -1,
         };
 
         if result >= 0 {

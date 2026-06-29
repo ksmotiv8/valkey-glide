@@ -16,7 +16,6 @@ import pytest
 from glide_shared.config import (
     GlideClientConfiguration,
     GlideClusterClientConfiguration,
-    NodeAddress,
 )
 from glide_sync.client_pool import ClientPool, PoolConfig
 

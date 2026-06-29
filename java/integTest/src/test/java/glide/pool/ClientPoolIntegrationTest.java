@@ -6,7 +6,6 @@ import static glide.TestConfiguration.STANDALONE_HOSTS;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-import glide.TestConfiguration;
 import glide.api.models.configuration.GlideClientConfiguration;
 import glide.api.models.configuration.GlideClusterClientConfiguration;
 import glide.api.models.configuration.NodeAddress;
@@ -61,10 +60,7 @@ public class ClientPoolIntegrationTest {
             for (String host : CLUSTER_HOSTS) {
                 String[] parts = host.split(":");
                 builder.address(
-                        NodeAddress.builder()
-                                .host(parts[0])
-                                .port(Integer.parseInt(parts[1]))
-                                .build());
+                        NodeAddress.builder().host(parts[0]).port(Integer.parseInt(parts[1])).build());
             }
             builder.requestTimeout(5000);
             return ClientPoolConfig.builder()
@@ -207,9 +203,7 @@ public class ClientPoolIntegrationTest {
 
         assertTrue(latch.await(30, TimeUnit.SECONDS), "All threads should finish");
         assertEquals(
-                numThreads,
-                successCount.get(),
-                "All threads should succeed. Errors: " + errorCount.get());
+                numThreads, successCount.get(), "All threads should succeed. Errors: " + errorCount.get());
 
         pool.close();
         System.out.println("testPoolConcurrentAccess PASSED (cluster=" + clusterMode + ")");
@@ -226,10 +220,7 @@ public class ClientPoolIntegrationTest {
             for (String host : CLUSTER_HOSTS) {
                 String[] parts = host.split(":");
                 builder.address(
-                        NodeAddress.builder()
-                                .host(parts[0])
-                                .port(Integer.parseInt(parts[1]))
-                                .build());
+                        NodeAddress.builder().host(parts[0]).port(Integer.parseInt(parts[1])).build());
             }
             builder.requestTimeout(5000);
             exhaustConfig =
@@ -250,9 +241,7 @@ public class ClientPoolIntegrationTest {
                                             .address(
                                                     NodeAddress.builder()
                                                             .host(STANDALONE_HOSTS[0].split(":")[0])
-                                                            .port(
-                                                                    Integer.parseInt(
-                                                                            STANDALONE_HOSTS[0].split(":")[1]))
+                                                            .port(Integer.parseInt(STANDALONE_HOSTS[0].split(":")[1]))
                                                             .build())
                                             .requestTimeout(5000)
                                             .build())

@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	glide "github.com/valkey-io/valkey-glide/go/v2"
 	"github.com/valkey-io/valkey-glide/go/v2/config"
+	"github.com/valkey-io/valkey-glide/go/v2/models"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -176,18 +177,25 @@ func scopeTestKey(prefix string, cluster bool) string {
 	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
 }
 
-// newScopeClient creates a glide.Client appropriate for the mode.
-// In standalone mode it connects to the standalone server.
-// In cluster mode it connects to a cluster node as a standalone client.
-func newScopeClient(t *testing.T, cluster bool) *glide.Client {
+// scopeTestClient is an interface satisfied by both Client and ClusterClient
+// for scope testing purposes.
+type scopeTestClient interface {
+	ScopedConnection(ctx context.Context, timeout time.Duration) (*glide.IsolatedScope, error)
+	Set(ctx context.Context, key string, value string) (string, error)
+	Get(ctx context.Context, key string) (models.Result[string], error)
+	Del(ctx context.Context, keys []string) (int64, error)
+	Close()
+}
+
+// newScopeClient creates a Client or ClusterClient appropriate for the mode.
+func newScopeClient(t *testing.T, cluster bool) scopeTestClient {
 	t.Helper()
-	var cfg *config.ClientConfiguration
 	if cluster {
-		cfg = standaloneConfigForClusterNode()
-	} else {
-		cfg = standaloneConfig()
+		client, err := glide.NewClusterClient(clusterConfig())
+		require.NoError(t, err)
+		return client
 	}
-	client, err := glide.NewClient(cfg)
+	client, err := glide.NewClient(standaloneConfig())
 	require.NoError(t, err)
 	return client
 }
