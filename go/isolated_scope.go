@@ -314,3 +314,87 @@ func (client *Client) getConnectionRequest() (*protobuf.ConnectionRequest, error
 	}
 	return client.clientConfig.ToProtobuf()
 }
+
+// ScopedConnection acquires an isolated execution scope from the cluster client.
+//
+// The scope provides a dedicated connection for WATCH/MULTI/EXEC, CLIENT TRACKING,
+// and other operations that require per-connection state.
+//
+// Usage:
+//
+//	scope, err := clusterClient.ScopedConnection(ctx, 5*time.Second)
+//	if err != nil { ... }
+//	defer scope.Close()
+//
+//	scope.Watch(ctx, "counter")
+//	val, _ := scope.Get(ctx, "counter")
+//	scope.Multi(ctx)
+//	scope.Set(ctx, "counter", incrementedVal)
+//	scope.Exec(ctx)
+func (client *ClusterClient) ScopedConnection(ctx context.Context, timeout time.Duration) (*IsolatedScope, error) {
+	client.mu.Lock()
+	if client.coreClient == nil {
+		client.mu.Unlock()
+		return nil, errors.New("client is closed")
+	}
+	clientID := uint64(uintptr(client.coreClient))
+	client.mu.Unlock()
+
+	// Get connection request bytes
+	request, err := client.getConnectionRequest()
+	if err != nil {
+		return nil, err
+	}
+	connReqBytes, err := proto.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+
+	deadline := time.Now().Add(timeout)
+	backoff := 10 * time.Millisecond
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		scopeID := C.glide_scope_try_acquire(
+			C.uint64_t(clientID),
+			(*C.uint8_t)(unsafe.Pointer(&connReqBytes[0])),
+			C.uintptr_t(len(connReqBytes)),
+		)
+
+		if scopeID >= 0 {
+			return &IsolatedScope{
+				scopeID:  int64(scopeID),
+				clientID: clientID,
+			}, nil
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, errors.New("timed out waiting for isolated scope (pool exhausted)")
+		}
+
+		sleep := backoff
+		if sleep > remaining {
+			sleep = remaining
+		}
+		time.Sleep(sleep)
+		backoff *= 2
+		if backoff > 500*time.Millisecond {
+			backoff = 500 * time.Millisecond
+		}
+	}
+}
+
+// getConnectionRequest returns the protobuf ConnectionRequest for this cluster client's config.
+// This is needed by scoped connections to create new TCP connections.
+func (client *ClusterClient) getConnectionRequest() (*protobuf.ConnectionRequest, error) {
+	if client.clientConfig == nil {
+		return nil, errors.New("client configuration not available for scoped connections")
+	}
+	return client.clientConfig.ToProtobuf()
+}

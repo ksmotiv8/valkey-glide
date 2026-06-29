@@ -265,3 +265,64 @@ func (p *ClientPool) Close() {
 	C.glide_pool_destroy(C.uint64_t(p.poolID))
 	p.pooledCache = nil
 }
+
+// NewClusterClientPool creates a new client-instance pool for cluster configurations.
+//
+// The pool pre-warms MinIdle connections in the background.
+func NewClusterClientPool(clientConfig *config.ClusterClientConfiguration, poolConfig PoolConfig) (*ClientPool, error) {
+	if poolConfig.MaxSize < 1 {
+		return nil, errors.New("MaxSize must be >= 1")
+	}
+	if poolConfig.MinIdle > poolConfig.MaxSize {
+		return nil, errors.New("MinIdle must be <= MaxSize")
+	}
+	if poolConfig.IdleTimeout <= 0 {
+		poolConfig.IdleTimeout = 5 * time.Minute
+	}
+	if poolConfig.RequestTimeout <= 0 {
+		poolConfig.RequestTimeout = 5 * time.Second
+	}
+	if poolConfig.AcquireTimeout <= 0 {
+		poolConfig.AcquireTimeout = 5 * time.Second
+	}
+
+	// Serialize connection request protobuf
+	request, err := clientConfig.ToProtobuf()
+	if err != nil {
+		return nil, err
+	}
+	connReqBytes, err := proto.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create the Rust pool with async clients (uses Go's success/failure callbacks)
+	clientType, err := buildAsyncClientType(
+		C.SuccessCallback(unsafe.Pointer(C.successCallback)),
+		C.FailureCallback(unsafe.Pointer(C.failureCallback)),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	poolID := C.glide_pool_create(
+		C.uint32_t(poolConfig.MaxSize),
+		C.uint32_t(poolConfig.MinIdle),
+		C.uint64_t(poolConfig.IdleTimeout.Milliseconds()),
+		C.uint64_t(poolConfig.RequestTimeout.Milliseconds()),
+		(*C.uint8_t)(unsafe.Pointer(&connReqBytes[0])),
+		C.uintptr_t(len(connReqBytes)),
+		&clientType,
+	)
+	if poolID < 0 {
+		return nil, errors.New("failed to create pool")
+	}
+
+	return &ClientPool{
+		poolID:      int64(poolID),
+		config:      poolConfig,
+		clientConf:  nil, // cluster config — standalone field unused
+		connReq:     connReqBytes,
+		pooledCache: make(map[int64]*PooledClient),
+	}, nil
+}

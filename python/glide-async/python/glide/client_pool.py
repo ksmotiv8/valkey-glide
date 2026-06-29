@@ -190,6 +190,24 @@ class AsyncClientPool:
             return client
 
     @property
+    def is_closed(self) -> bool:
+        return self._closed
+
+    @property
+    def pool_id(self) -> int:
+        return self._pool_id
+
+    def metrics(self) -> dict:
+        """Get pool metrics: idle, active, total counts."""
+        idle = self._ffi.new("uint32_t*")
+        active = self._ffi.new("uint32_t*")
+        total = self._ffi.new("uint32_t*")
+        result = self._lib.glide_pool_metrics(self._pool_id, idle, active, total)
+        if result != 0:
+            return {"idle": 0, "active": 0, "total": 0}
+        return {"idle": idle[0], "active": active[0], "total": total[0]}
+
+    @property
     def idle_count(self) -> int:
         idle = self._ffi.new("uint32_t*")
         self._lib.glide_pool_metrics(
