@@ -24,6 +24,11 @@ When a borrowed client is returned to the pool:
 
 This guarantees the next borrower gets a clean connection. If the reset fails (timeout or network error), the connection is discarded and a new one will be created on demand.
 
+### Pool Limitations
+
+- **Pub/Sub subscriptions**: Do not call `SUBSCRIBE`/`PSUBSCRIBE` on a pooled client. The pool's state reset does not send UNSUBSCRIBE, so the next borrower would receive a connection stuck in subscription mode. Use the main client's pubsub API instead, which manages dedicated subscription connections internally.
+- **Configure-time pubsub**: Pool configs should not include pubsub subscriptions. Pooled clients are for stateless command execution (GET/SET/etc.), not long-lived subscription connections.
+
 ### Auto-Reconnection
 
 Pooled clients inherit the full `GlideClient` reconnection stack:
@@ -45,7 +50,10 @@ A dedicated, non-multiplexed connection borrowed from a per-client scope pool. P
 - **WATCH/MULTI/EXEC** (optimistic concurrency control)
 - **CLIENT TRACKING** (server-side key invalidation)
 - **Blocking commands** (BLPOP, XREAD BLOCK)
-- **Pub/Sub** on dedicated connections
+
+### Current Limitations
+
+- **Pub/Sub subscriptions** are not supported on scoped connections. SUBSCRIBE puts the connection into a push-message mode that requires a dedicated message handler — scoped connections don't wire one up. Use the main client's pubsub API instead (which manages its own dedicated subscription connections internally). This is consistent with how other Redis/Valkey clients handle pubsub (Lettuce, redis-py, node-redis all use separate connection types for subscriptions).
 
 ### State Inheritance
 
