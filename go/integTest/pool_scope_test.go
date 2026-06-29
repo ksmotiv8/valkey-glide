@@ -883,7 +883,6 @@ func TestScopeInflightLimit(t *testing.T) {
 	}
 }
 
-
 func TestPoolPublish(t *testing.T) {
 	for _, tc := range scopeModes() {
 		t.Run(tc.name, func(t *testing.T) {

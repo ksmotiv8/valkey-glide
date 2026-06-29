@@ -789,14 +789,14 @@ class TestDatabaseStateInheritance:
             request_timeout=5000,
             database_id=0,
         )
-        pool_config = PoolConfig(
-            max_size=1,
-            min_idle=1,
-            acquire_timeout_s=10.0,
-            client_config=config,
+        pool = ClientPool(
+            config,
+            PoolConfig(max_size=1, min_idle=1, acquire_timeout_s=10.0),
         )
-        pool = ClientPool.create(pool_config)
-        time.sleep(2)  # Wait for min_idle warmup
+
+        deadline = time.monotonic() + 30
+        while pool.metrics().get("idle", 0) < 1 and time.monotonic() < deadline:
+            time.sleep(0.5)
 
         key = _make_key(False, "pool-db-reset")
 

@@ -34,6 +34,17 @@ EXCLUDED_TESTS = {
         "test_async_context_manager",
         "test_client_recreation_after_close",
         "test_mixed_async_sync_client_lib_names",
+        # Free-threading tests — async-only (tests async thread pool dispatch)
+        "test_concurrent_commands_single_client",
+        "test_high_concurrency_pipeline",
+        "test_multiple_clients_concurrent",
+        "client_worker",
+        "get_and_store",
+        "get_standalone_config",
+        # Pool metrics (async has individual properties as tests)
+        "test_pool_metrics",
+        # Scope DB test with different naming
+        "test_scope_inherits_runtime_select",
         # Dynamic PubSub tests helper functions
         "unsubscribe_by_method",
         "psubscribe_by_method",

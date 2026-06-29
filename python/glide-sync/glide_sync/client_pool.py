@@ -231,6 +231,18 @@ class ClientPool:
             return {"idle": 0, "active": 0, "total": 0}
         return {"idle": idle[0], "active": active[0], "total": total[0]}
 
+    @property
+    def idle_count(self) -> int:
+        return self.metrics()["idle"]
+
+    @property
+    def active_count(self) -> int:
+        return self.metrics()["active"]
+
+    @property
+    def total_count(self) -> int:
+        return self.metrics()["total"]
+
     def close(self) -> None:
         """Destroy the pool. All idle clients are closed."""
         if not self._closed:
