@@ -792,7 +792,7 @@ class TestDatabaseStateInheritance:
         pool_config = PoolConfig(
             max_size=1,
             min_idle=1,
-            acquire_timeout_ms=10000,
+            acquire_timeout_s=10.0,
             client_config=config,
         )
         pool = ClientPool.create(pool_config)

@@ -178,9 +178,7 @@ class TestAsyncFreeThreading:
         Validates no response cross-contamination under parallel execution.
         """
         config = get_standalone_config()
-        pool = AsyncClientPool(
-            config, PoolConfig(max_size=8, min_idle=4)
-        )
+        pool = AsyncClientPool(config, PoolConfig(max_size=8, min_idle=4))
         await asyncio.sleep(4)  # Wait for min_idle warmup
 
         num_tasks = 16
@@ -221,9 +219,7 @@ class TestAsyncFreeThreading:
         internal state under high concurrency with async tasks.
         """
         config = get_standalone_config()
-        pool = AsyncClientPool(
-            config, PoolConfig(max_size=8, min_idle=4)
-        )
+        pool = AsyncClientPool(config, PoolConfig(max_size=8, min_idle=4))
         await asyncio.sleep(4)  # Wait for min_idle warmup
 
         num_tasks = 16
@@ -252,9 +248,7 @@ class TestAsyncFreeThreading:
         response parser under parallel access.
         """
         config = get_standalone_config()
-        pool = AsyncClientPool(
-            config, PoolConfig(max_size=8, min_idle=4)
-        )
+        pool = AsyncClientPool(config, PoolConfig(max_size=8, min_idle=4))
         await asyncio.sleep(4)  # Wait for min_idle warmup
 
         num_tasks = 8
@@ -270,9 +264,7 @@ class TestAsyncFreeThreading:
                         val = await client.get(key)
                         actual = int(val) if val else -1
                         if actual != i:
-                            errors.append(
-                                f"Task {task_id}: expected {i}, got {actual}"
-                            )
+                            errors.append(f"Task {task_id}: expected {i}, got {actual}")
                             return
                         await client.delete([key])
                     except Exception as e:
@@ -291,9 +283,7 @@ class TestAsyncFreeThreading:
         Validates that concurrent readers don't crash under async concurrency.
         """
         config = get_standalone_config()
-        pool = AsyncClientPool(
-            config, PoolConfig(max_size=8, min_idle=4)
-        )
+        pool = AsyncClientPool(config, PoolConfig(max_size=8, min_idle=4))
         await asyncio.sleep(4)  # Wait for min_idle warmup
 
         stop_event = asyncio.Event()

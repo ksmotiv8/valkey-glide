@@ -950,96 +950,6 @@ class BaseClient(CoreCommands):
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         await self.close()
 
-
-class GlideClusterClient(BaseClient, ClusterCommands):
-    """
-    Client used for connection to cluster servers.
-    Use :func:`~BaseClient.create` to request a client.
-    For full documentation, see
-    [Valkey GLIDE Documentation](https://glide.valkey.io/how-to/client-initialization/#cluster)
-    """
-
-    async def _cluster_scan(
-        self,
-        cursor: ClusterScanCursor,
-        match: Optional[TEncodable] = None,
-        count: Optional[int] = None,
-        type: Optional[ObjectType] = None,
-        allow_non_covered_slots: bool = False,
-    ) -> List[Union[ClusterScanCursor, List[bytes]]]:
-        if self._is_closed:
-            raise ClosingError(
-                "Unable to execute requests; the client is closed. Please create a new client."
-            )
-
-        callback_id = self._get_callback_id()
-        fut = _get_new_future_instance()
-
-        self._register_future(callback_id, fut)
-
-        # Build scan args
-        args = []
-        if match is not None:
-            encoded_match = match.encode(ENCODING) if isinstance(match, str) else match
-            args.extend([b"MATCH", encoded_match])
-        if count is not None:
-            args.extend([b"COUNT", str(count).encode(ENCODING)])
-        if type is not None:
-            args.extend([b"TYPE", type.value.encode(ENCODING)])
-        if allow_non_covered_slots:
-            args.extend([b"ALLOW_NON_COVERED_SLOTS"])
-
-        cursor_string = cursor.get_cursor()
-        cursor_bytes = cursor_string.encode(ENCODING) + b"\0"
-        cursor_buffer = self._ffi.from_buffer(cursor_bytes)
-
-        if args:
-            args_array, args_len_array, arg_buffers = self._to_c_strings(args)
-            arg_count = len(args)
-        else:
-            args_array = self._ffi.NULL
-            args_len_array = self._ffi.NULL
-            arg_count = 0
-
-        self._lib.request_cluster_scan(
-            self._core_client,
-            callback_id,
-            cursor_buffer,
-            arg_count,
-            args_array,
-            args_len_array,
-        )
-
-        response_data = await fut
-
-        if not isinstance(response_data, list) or len(response_data) != 2:
-            raise RequestError("Unexpected cluster scan response format")
-
-        new_cursor = response_data[0]
-        if isinstance(new_cursor, bytes):
-            new_cursor = new_cursor.decode(ENCODING)
-
-        keys_list = response_data[1] if response_data[1] is not None else []
-        return [ClusterScanCursor(new_cursor), keys_list]
-
-    async def get_subscriptions(
-        self,
-    ) -> GlideClusterClientConfiguration.PubSubState:
-        result = await self._execute_command(RequestType.GetSubscriptions, [])
-        return cast(
-            GlideClusterClientConfiguration.PubSubState,
-            self._parse_pubsub_state(result, is_cluster=True),
-        )
-
-
-class GlideClient(BaseClient, StandaloneCommands):
-    """
-    Client used for connection to standalone servers.
-    Use :func:`~BaseClient.create` to request a client.
-    For full documentation, see
-    [Valkey GLIDE Documentation](https://glide.valkey.io/how-to/client-initialization/#standalone)
-    """
-
     async def scoped_connection(self, timeout: float = 5.0) -> "AsyncIsolatedScope":
         """
         Acquire an isolated execution scope — a dedicated connection for operations
@@ -1146,6 +1056,96 @@ class GlideClient(BaseClient, StandaloneCommands):
             raise RuntimeError("Server error (unknown)")
         else:
             return None
+
+
+class GlideClusterClient(BaseClient, ClusterCommands):
+    """
+    Client used for connection to cluster servers.
+    Use :func:`~BaseClient.create` to request a client.
+    For full documentation, see
+    [Valkey GLIDE Documentation](https://glide.valkey.io/how-to/client-initialization/#cluster)
+    """
+
+    async def _cluster_scan(
+        self,
+        cursor: ClusterScanCursor,
+        match: Optional[TEncodable] = None,
+        count: Optional[int] = None,
+        type: Optional[ObjectType] = None,
+        allow_non_covered_slots: bool = False,
+    ) -> List[Union[ClusterScanCursor, List[bytes]]]:
+        if self._is_closed:
+            raise ClosingError(
+                "Unable to execute requests; the client is closed. Please create a new client."
+            )
+
+        callback_id = self._get_callback_id()
+        fut = _get_new_future_instance()
+
+        self._register_future(callback_id, fut)
+
+        # Build scan args
+        args = []
+        if match is not None:
+            encoded_match = match.encode(ENCODING) if isinstance(match, str) else match
+            args.extend([b"MATCH", encoded_match])
+        if count is not None:
+            args.extend([b"COUNT", str(count).encode(ENCODING)])
+        if type is not None:
+            args.extend([b"TYPE", type.value.encode(ENCODING)])
+        if allow_non_covered_slots:
+            args.extend([b"ALLOW_NON_COVERED_SLOTS"])
+
+        cursor_string = cursor.get_cursor()
+        cursor_bytes = cursor_string.encode(ENCODING) + b"\0"
+        cursor_buffer = self._ffi.from_buffer(cursor_bytes)
+
+        if args:
+            args_array, args_len_array, arg_buffers = self._to_c_strings(args)
+            arg_count = len(args)
+        else:
+            args_array = self._ffi.NULL
+            args_len_array = self._ffi.NULL
+            arg_count = 0
+
+        self._lib.request_cluster_scan(
+            self._core_client,
+            callback_id,
+            cursor_buffer,
+            arg_count,
+            args_array,
+            args_len_array,
+        )
+
+        response_data = await fut
+
+        if not isinstance(response_data, list) or len(response_data) != 2:
+            raise RequestError("Unexpected cluster scan response format")
+
+        new_cursor = response_data[0]
+        if isinstance(new_cursor, bytes):
+            new_cursor = new_cursor.decode(ENCODING)
+
+        keys_list = response_data[1] if response_data[1] is not None else []
+        return [ClusterScanCursor(new_cursor), keys_list]
+
+    async def get_subscriptions(
+        self,
+    ) -> GlideClusterClientConfiguration.PubSubState:
+        result = await self._execute_command(RequestType.GetSubscriptions, [])
+        return cast(
+            GlideClusterClientConfiguration.PubSubState,
+            self._parse_pubsub_state(result, is_cluster=True),
+        )
+
+
+class GlideClient(BaseClient, StandaloneCommands):
+    """
+    Client used for connection to standalone servers.
+    Use :func:`~BaseClient.create` to request a client.
+    For full documentation, see
+    [Valkey GLIDE Documentation](https://glide.valkey.io/how-to/client-initialization/#standalone)
+    """
 
     async def get_subscriptions(
         self,

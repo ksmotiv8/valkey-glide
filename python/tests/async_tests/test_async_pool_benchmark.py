@@ -14,6 +14,7 @@ import sys
 import time
 
 import pytest
+import pytest_asyncio
 from glide import (
     AsyncClientPool,
     GlideClient,
@@ -36,7 +37,7 @@ def get_config() -> GlideClientConfiguration:
 class TestPoolBenchmark:
     """Throughput benchmarks for async pool."""
 
-    @pytest.fixture
+    @pytest_asyncio.fixture
     async def pool(self):
         config = get_config()
         p = AsyncClientPool(config, PoolConfig(max_size=8, min_idle=4))
@@ -80,8 +81,7 @@ class TestPoolBenchmark:
 
             start = time.perf_counter()
             tasks = [
-                asyncio.create_task(worker(t, ops_per_task))
-                for t in range(num_tasks)
+                asyncio.create_task(worker(t, ops_per_task)) for t in range(num_tasks)
             ]
             await asyncio.gather(*tasks)
             elapsed = time.perf_counter() - start

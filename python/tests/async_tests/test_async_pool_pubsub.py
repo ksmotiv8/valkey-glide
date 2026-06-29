@@ -35,9 +35,7 @@ class TestPoolPubSub:
     async def test_publish_from_pool(self):
         """Pool clients can publish messages."""
         config = get_config()
-        pool = AsyncClientPool(
-            config, PoolConfig(max_size=3, min_idle=1)
-        )
+        pool = AsyncClientPool(config, PoolConfig(max_size=3, min_idle=1))
         await asyncio.sleep(5)  # Allow warmup (CI can be slow)
 
         channel = f"test-channel-{uuid.uuid4().hex[:8]}"
@@ -53,9 +51,7 @@ class TestPoolPubSub:
     async def test_concurrent_publish(self):
         """Multiple tasks publishing through pooled clients concurrently."""
         config = get_config()
-        pool = AsyncClientPool(
-            config, PoolConfig(max_size=4, min_idle=2)
-        )
+        pool = AsyncClientPool(config, PoolConfig(max_size=4, min_idle=2))
         await asyncio.sleep(5)  # Allow warmup (CI can be slow)
 
         channel = f"concurrent-pub-{uuid.uuid4().hex[:8]}"
@@ -74,9 +70,7 @@ class TestPoolPubSub:
                     errors.append(f"Task {task_id} msg {i}: {e}")
                     return
 
-        tasks = [
-            asyncio.create_task(publisher(t)) for t in range(num_tasks)
-        ]
+        tasks = [asyncio.create_task(publisher(t)) for t in range(num_tasks)]
         await asyncio.gather(*tasks)
 
         assert not errors, "Publish errors:\n" + "\n".join(errors[:10])
@@ -88,9 +82,7 @@ class TestPoolPubSub:
         Validates messages arrive correctly under concurrent pool usage.
         """
         config = get_config()
-        pool = AsyncClientPool(
-            config, PoolConfig(max_size=3, min_idle=1)
-        )
+        pool = AsyncClientPool(config, PoolConfig(max_size=3, min_idle=1))
         await asyncio.sleep(5)  # Allow warmup (CI can be slow)
 
         channel = f"sub-test-{uuid.uuid4().hex[:8]}"
