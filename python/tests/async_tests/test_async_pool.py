@@ -35,7 +35,7 @@ def pool_config():
 class TestAsyncClientPool:
     """Async pool lifecycle tests."""
 
-    async def test_pool_create_acquire_release(self, pool_config):
+    async def test_pool_create_and_metrics(self, pool_config):
         """Create pool, acquire client, execute commands, release, close."""
         pool = AsyncClientPool(pool_config, PoolConfig(max_size=3, min_idle=1))
         await asyncio.sleep(3)  # Wait for pool warmup
@@ -47,6 +47,20 @@ class TestAsyncClientPool:
             await client.set(key, "hello")
             val = await client.get(key)
             assert val == b"hello"
+            await client.delete([key])
+
+        pool.close()
+
+    async def test_pool_borrow_and_commands(self, pool_config):
+        """Borrow client from pool, execute commands, auto-release."""
+        pool = AsyncClientPool(pool_config, PoolConfig(max_size=3, min_idle=1))
+        await asyncio.sleep(3)  # Wait for pool warmup
+
+        async with pool.borrow() as client:
+            key = f"async-pool-borrow-{uuid.uuid4().hex[:8]}"
+            await client.set(key, "world")
+            val = await client.get(key)
+            assert val == b"world"
             await client.delete([key])
 
         pool.close()
@@ -76,7 +90,7 @@ class TestAsyncClientPool:
 
         pool.close()
 
-    async def test_pool_exhaustion_timeout(self, pool_config):
+    async def test_pool_timeout_on_exhaustion(self, pool_config):
         """Timeout when pool is exhausted."""
         pool = AsyncClientPool(pool_config, PoolConfig(max_size=1, min_idle=1))
         await asyncio.sleep(3)  # Wait for pool warmup
