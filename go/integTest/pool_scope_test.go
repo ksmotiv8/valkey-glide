@@ -207,169 +207,201 @@ func skipMode(t *testing.T, cluster bool) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Feature 1: ClientPool tests (unchanged)
+// Feature 1: ClientPool tests (parameterized: standalone + cluster)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-func TestPoolCreateAndMetrics(t *testing.T) {
-	skipIfNoStandaloneEndpoints(t)
-	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
-		MaxSize:        3,
-		MinIdle:        2,
-		AcquireTimeout: 10 * time.Second,
-	})
+// newPool creates a ClientPool appropriate for the mode.
+func newPool(t *testing.T, cluster bool, poolCfg glide.PoolConfig) *glide.ClientPool {
+	t.Helper()
+	var cfg *config.ClientConfiguration
+	if cluster {
+		cfg = standaloneConfigForClusterNode()
+	} else {
+		cfg = standaloneConfig()
+	}
+	pool, err := glide.NewClientPool(cfg, poolCfg)
 	require.NoError(t, err)
-	defer pool.Close()
+	return pool
+}
 
-	time.Sleep(3 * time.Second)
+func TestPoolCreateAndMetrics(t *testing.T) {
+	for _, tc := range scopeModes() {
+		t.Run(tc.name, func(t *testing.T) {
+			skipMode(t, tc.cluster)
+			pool := newPool(t, tc.cluster, glide.PoolConfig{
+				MaxSize:        3,
+				MinIdle:        2,
+				AcquireTimeout: 10 * time.Second,
+			})
+			defer pool.Close()
 
-	assert.GreaterOrEqual(t, pool.IdleCount(), 1)
-	assert.GreaterOrEqual(t, pool.TotalCount(), 1)
+			time.Sleep(3 * time.Second)
+
+			assert.GreaterOrEqual(t, pool.IdleCount(), 1)
+			assert.GreaterOrEqual(t, pool.TotalCount(), 1)
+		})
+	}
 }
 
 func TestPoolAcquireAndCommands(t *testing.T) {
-	skipIfNoStandaloneEndpoints(t)
-	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
-		MaxSize:        3,
-		MinIdle:        1,
-		AcquireTimeout: 10 * time.Second,
-	})
-	require.NoError(t, err)
-	defer pool.Close()
+	for _, tc := range scopeModes() {
+		t.Run(tc.name, func(t *testing.T) {
+			skipMode(t, tc.cluster)
+			pool := newPool(t, tc.cluster, glide.PoolConfig{
+				MaxSize:        3,
+				MinIdle:        1,
+				AcquireTimeout: 10 * time.Second,
+			})
+			defer pool.Close()
 
-	time.Sleep(3 * time.Second)
+			time.Sleep(3 * time.Second)
 
-	ctx := context.Background()
-	clientID, err := pool.Acquire(ctx)
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, clientID, int64(0))
+			ctx := context.Background()
+			clientID, err := pool.Acquire(ctx)
+			require.NoError(t, err)
+			assert.GreaterOrEqual(t, clientID, int64(0))
 
-	client, err := pool.GetClient(clientID)
-	require.NoError(t, err)
+			client, err := pool.GetClient(clientID)
+			require.NoError(t, err)
 
-	key := fmt.Sprintf("go-pool-test-%d", time.Now().UnixNano())
-	_, err = client.Set(ctx, key, "hello")
-	require.NoError(t, err)
+			key := scopeTestKey("go-pool-test", tc.cluster)
+			_, err = client.Set(ctx, key, "hello")
+			require.NoError(t, err)
 
-	val, err := client.Get(ctx, key)
-	require.NoError(t, err)
-	assert.Equal(t, "hello", val.Value())
+			val, err := client.Get(ctx, key)
+			require.NoError(t, err)
+			assert.Equal(t, "hello", val.Value())
 
-	client.Client.Del(ctx, []string{key})
-	client.Close()
+			client.Client.Del(ctx, []string{key})
+			client.Close()
+		})
+	}
 }
 
 func TestPoolReuse(t *testing.T) {
-	skipIfNoStandaloneEndpoints(t)
-	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
-		MaxSize:        3,
-		MinIdle:        1,
-		AcquireTimeout: 10 * time.Second,
-	})
-	require.NoError(t, err)
-	defer pool.Close()
+	for _, tc := range scopeModes() {
+		t.Run(tc.name, func(t *testing.T) {
+			skipMode(t, tc.cluster)
+			pool := newPool(t, tc.cluster, glide.PoolConfig{
+				MaxSize:        3,
+				MinIdle:        1,
+				AcquireTimeout: 10 * time.Second,
+			})
+			defer pool.Close()
 
-	time.Sleep(3 * time.Second)
+			time.Sleep(3 * time.Second)
 
-	ctx := context.Background()
-	id1, _ := pool.Acquire(ctx)
-	pool.Release(id1)
-	time.Sleep(100 * time.Millisecond)
+			ctx := context.Background()
+			id1, _ := pool.Acquire(ctx)
+			pool.Release(id1)
+			time.Sleep(100 * time.Millisecond)
 
-	id2, _ := pool.Acquire(ctx)
-	pool.Release(id2)
+			id2, _ := pool.Acquire(ctx)
+			pool.Release(id2)
 
-	assert.Equal(t, id1, id2)
+			assert.Equal(t, id1, id2)
+		})
+	}
 }
 
 func TestPoolExhaustionTimeout(t *testing.T) {
-	skipIfNoStandaloneEndpoints(t)
-	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
-		MaxSize:        1,
-		MinIdle:        1,
-		AcquireTimeout: 10 * time.Second,
-	})
-	require.NoError(t, err)
-	defer pool.Close()
+	for _, tc := range scopeModes() {
+		t.Run(tc.name, func(t *testing.T) {
+			skipMode(t, tc.cluster)
+			pool := newPool(t, tc.cluster, glide.PoolConfig{
+				MaxSize:        1,
+				MinIdle:        1,
+				AcquireTimeout: 10 * time.Second,
+			})
+			defer pool.Close()
 
-	time.Sleep(3 * time.Second)
+			time.Sleep(3 * time.Second)
 
-	ctx := context.Background()
-	id1, _ := pool.Acquire(ctx)
+			ctx := context.Background()
+			id1, _ := pool.Acquire(ctx)
 
-	_, err = pool.AcquireWithTimeout(ctx, 500*time.Millisecond)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "timed out")
+			_, err := pool.AcquireWithTimeout(ctx, 500*time.Millisecond)
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "timed out")
 
-	pool.Release(id1)
+			pool.Release(id1)
+		})
+	}
 }
 
 func TestPoolConcurrentAccess(t *testing.T) {
-	skipIfNoStandaloneEndpoints(t)
-	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
-		MaxSize:        4,
-		MinIdle:        4,
-		AcquireTimeout: 15 * time.Second,
-	})
-	require.NoError(t, err)
-	defer pool.Close()
+	for _, tc := range scopeModes() {
+		t.Run(tc.name, func(t *testing.T) {
+			skipMode(t, tc.cluster)
+			pool := newPool(t, tc.cluster, glide.PoolConfig{
+				MaxSize:        4,
+				MinIdle:        4,
+				AcquireTimeout: 15 * time.Second,
+			})
+			defer pool.Close()
 
-	time.Sleep(4 * time.Second)
+			time.Sleep(4 * time.Second)
 
-	ctx := context.Background()
-	var wg sync.WaitGroup
-	errCh := make(chan error, 8)
+			ctx := context.Background()
+			var wg sync.WaitGroup
+			errCh := make(chan error, 8)
 
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			clientID, err := pool.Acquire(ctx)
-			if err != nil {
-				errCh <- err
-				return
+			for i := 0; i < 8; i++ {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					clientID, err := pool.Acquire(ctx)
+					if err != nil {
+						errCh <- err
+						return
+					}
+
+					client, err := pool.GetClient(clientID)
+					if err != nil {
+						errCh <- err
+						return
+					}
+
+					key := scopeTestKey(fmt.Sprintf("pool-concurrent-%d", idx), tc.cluster)
+					_, err = client.Set(ctx, key, fmt.Sprintf("val-%d", idx))
+					if err != nil {
+						errCh <- err
+						return
+					}
+					client.Client.Del(ctx, []string{key})
+					client.Close()
+				}(i)
 			}
 
-			client, err := pool.GetClient(clientID)
-			if err != nil {
-				errCh <- err
-				return
+			wg.Wait()
+			close(errCh)
+
+			for err := range errCh {
+				t.Fatalf("concurrent access error: %v", err)
 			}
-
-			key := fmt.Sprintf("go-pool-concurrent-%d", idx)
-			_, err = client.Set(ctx, key, fmt.Sprintf("val-%d", idx))
-			if err != nil {
-				errCh <- err
-				return
-			}
-			client.Client.Del(ctx, []string{key})
-			client.Close()
-		}(i)
-	}
-
-	wg.Wait()
-	close(errCh)
-
-	for err := range errCh {
-		t.Fatalf("concurrent access error: %v", err)
+		})
 	}
 }
 
 func TestPoolCloseRejectsAcquire(t *testing.T) {
-	skipIfNoStandaloneEndpoints(t)
-	pool, err := glide.NewClientPool(standaloneConfig(), glide.PoolConfig{
-		MaxSize:        2,
-		MinIdle:        1,
-		AcquireTimeout: 10 * time.Second,
-	})
-	require.NoError(t, err)
+	for _, tc := range scopeModes() {
+		t.Run(tc.name, func(t *testing.T) {
+			skipMode(t, tc.cluster)
+			pool := newPool(t, tc.cluster, glide.PoolConfig{
+				MaxSize:        2,
+				MinIdle:        1,
+				AcquireTimeout: 10 * time.Second,
+			})
 
-	time.Sleep(3 * time.Second)
-	pool.Close()
+			time.Sleep(3 * time.Second)
+			pool.Close()
 
-	ctx := context.Background()
-	_, err = pool.Acquire(ctx)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "closed")
+			ctx := context.Background()
+			_, err := pool.Acquire(ctx)
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "closed")
+		})
+	}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -800,6 +832,172 @@ func TestScopeDatabaseInheritance(t *testing.T) {
 				"Key on db2 should not be visible on db0")
 
 			client.Del(ctx, []string{key})
+		})
+	}
+}
+
+func TestScopeInflightLimit(t *testing.T) {
+	for _, tc := range scopeModes() {
+		t.Run(tc.name, func(t *testing.T) {
+			skipMode(t, tc.cluster)
+			client := newScopeClient(t, tc.cluster)
+			defer client.Close()
+
+			ctx := context.Background()
+			scope, err := client.ScopedConnection(ctx, 10*time.Second)
+			require.NoError(t, err)
+			defer scope.Close()
+
+			// 50 sequential SET/GET/DEL cycles should work within inflight limits
+			for i := 0; i < 50; i++ {
+				key := scopeTestKey(fmt.Sprintf("inflight-%d", i), tc.cluster)
+				_, err := scope.Set(ctx, key, fmt.Sprintf("value-%d", i))
+				require.NoError(t, err)
+
+				val, err := scope.Get(ctx, key)
+				require.NoError(t, err)
+				assert.Equal(t, fmt.Sprintf("value-%d", i), val)
+
+				_, err = scope.ExecuteCommand(ctx, "DEL", key)
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestScopeDisconnection(t *testing.T) {
+	for _, tc := range scopeModes() {
+		t.Run(tc.name, func(t *testing.T) {
+			skipMode(t, tc.cluster)
+			client := newScopeClient(t, tc.cluster)
+			defer client.Close()
+
+			ctx := context.Background()
+			scope, err := client.ScopedConnection(ctx, 10*time.Second)
+			require.NoError(t, err)
+			defer scope.Close()
+
+			// Kill the scope's own connection
+			clientIdStr, err := scope.ExecuteCommand(ctx, "CLIENT", "ID")
+			require.NoError(t, err)
+			_, err = scope.ExecuteCommand(ctx, "CLIENT", "KILL", "ID", clientIdStr)
+			require.NoError(t, err)
+			time.Sleep(100 * time.Millisecond)
+
+			// Next command on the killed scope should fail
+			_, err = scope.Ping(ctx)
+			assert.Error(t, err, "Command on a killed scope connection should fail")
+		})
+	}
+}
+
+func TestScopeBrokenDoesNotPollutePool(t *testing.T) {
+	for _, tc := range scopeModes() {
+		t.Run(tc.name, func(t *testing.T) {
+			skipMode(t, tc.cluster)
+			client := newScopeClient(t, tc.cluster)
+			defer client.Close()
+
+			ctx := context.Background()
+
+			// Acquire a scope and kill its connection
+			scope1, err := client.ScopedConnection(ctx, 10*time.Second)
+			require.NoError(t, err)
+			clientIdStr, err := scope1.ExecuteCommand(ctx, "CLIENT", "ID")
+			require.NoError(t, err)
+			_, err = scope1.ExecuteCommand(ctx, "CLIENT", "KILL", "ID", clientIdStr)
+			require.NoError(t, err)
+			time.Sleep(100 * time.Millisecond)
+			scope1.Close()
+
+			// Allow the pool to process the dead connection
+			time.Sleep(300 * time.Millisecond)
+
+			// Next scope acquire should get a healthy connection
+			scope2, err := client.ScopedConnection(ctx, 10*time.Second)
+			require.NoError(t, err)
+			defer scope2.Close()
+
+			result, err := scope2.Ping(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, "PONG", result,
+				"New scope after a broken one should get a healthy connection")
+		})
+	}
+}
+
+func TestScopeNoAutoReconnect(t *testing.T) {
+	for _, tc := range scopeModes() {
+		t.Run(tc.name, func(t *testing.T) {
+			skipMode(t, tc.cluster)
+			client := newScopeClient(t, tc.cluster)
+			defer client.Close()
+
+			ctx := context.Background()
+			key := scopeTestKey("no-reconnect", tc.cluster)
+			client.Set(ctx, key, "initial")
+
+			scope, err := client.ScopedConnection(ctx, 10*time.Second)
+			require.NoError(t, err)
+			defer scope.Close()
+
+			// Start a WATCH
+			_, err = scope.Watch(ctx, key)
+			require.NoError(t, err)
+
+			// Kill the connection mid-WATCH
+			clientIdStr, err := scope.ExecuteCommand(ctx, "CLIENT", "ID")
+			require.NoError(t, err)
+			_, err = scope.ExecuteCommand(ctx, "CLIENT", "KILL", "ID", clientIdStr)
+			require.NoError(t, err)
+			time.Sleep(100 * time.Millisecond)
+
+			// The scope should NOT transparently reconnect — command should fail
+			_, err = scope.Get(ctx, key)
+			assert.Error(t, err,
+				"Scope should not auto-reconnect after connection kill mid-WATCH")
+
+			client.Del(ctx, []string{key})
+		})
+	}
+}
+
+func TestPoolPublish(t *testing.T) {
+	for _, tc := range scopeModes() {
+		t.Run(tc.name, func(t *testing.T) {
+			skipMode(t, tc.cluster)
+
+			pool, err := glide.NewClientPool(
+				func() *config.ClientConfiguration {
+					if tc.cluster {
+						return standaloneConfigForClusterNode()
+					}
+					return standaloneConfig()
+				}(),
+				glide.PoolConfig{
+					MaxSize:        2,
+					MinIdle:        1,
+					AcquireTimeout: 10 * time.Second,
+				},
+			)
+			require.NoError(t, err)
+			defer pool.Close()
+
+			time.Sleep(3 * time.Second)
+
+			ctx := context.Background()
+			clientID, err := pool.Acquire(ctx)
+			require.NoError(t, err)
+
+			client, err := pool.GetClient(clientID)
+			require.NoError(t, err)
+
+			// PUBLISH to a channel via custom command — just verify no crash
+			channel := scopeTestKey("pool-pub-channel", tc.cluster)
+			_, err = client.CustomCommand(ctx, []string{"PUBLISH", channel, "test-message"})
+			require.NoError(t, err, "PUBLISH via pooled client should not crash")
+
+			client.Close()
 		})
 	}
 }

@@ -542,6 +542,102 @@ public class ScopeConnectionModifiersTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
+    // Disconnection / Reconnection Tests
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testScopeDisconnectionBehavior(boolean clusterMode) throws Exception {
+        assumeMode(clusterMode);
+
+        try (ClientWrapper client = createClient(clusterMode, null, 5000)) {
+            try (IsolatedScope scope =
+                    client.scopedConnection(Duration.ofSeconds(10)).get(10, TimeUnit.SECONDS)) {
+                // Kill the scope's own connection
+                String clientId = scope.executeCommand("CLIENT", "ID").get(5, TimeUnit.SECONDS);
+                scope.executeCommand("CLIENT", "KILL", "ID", clientId).get(5, TimeUnit.SECONDS);
+                Thread.sleep(100);
+
+                // Next command on the killed scope should fail
+                try {
+                    scope.executeCommand("PING").get(5, TimeUnit.SECONDS);
+                    fail("Command on a killed scope connection should fail");
+                } catch (Exception e) {
+                    // Expected — connection was killed
+                    assertNotNull(e, "Should get an error after connection kill");
+                }
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testBrokenScopeDoesNotPollutePool(boolean clusterMode) throws Exception {
+        assumeMode(clusterMode);
+
+        try (ClientWrapper client = createClient(clusterMode, null, 5000)) {
+            // Acquire a scope and kill its connection
+            try (IsolatedScope scope1 =
+                    client.scopedConnection(Duration.ofSeconds(10)).get(10, TimeUnit.SECONDS)) {
+                String clientId = scope1.executeCommand("CLIENT", "ID").get(5, TimeUnit.SECONDS);
+                scope1.executeCommand("CLIENT", "KILL", "ID", clientId).get(5, TimeUnit.SECONDS);
+                Thread.sleep(100);
+            }
+
+            // Allow the pool to process the dead connection
+            Thread.sleep(300);
+
+            // Next scope acquire should get a healthy connection
+            try (IsolatedScope scope2 =
+                    client.scopedConnection(Duration.ofSeconds(10)).get(10, TimeUnit.SECONDS)) {
+                String result = scope2.executeCommand("PING").get(5, TimeUnit.SECONDS);
+                assertNotNull(result, "New scope after a broken one should get a healthy connection");
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testPoolPublish(boolean clusterMode) throws Exception {
+        assumeMode(clusterMode);
+
+        // Use the pool to acquire a client, PUBLISH, and verify no crash
+        String host;
+        int port;
+        if (clusterMode) {
+            host = CLUSTER_HOSTS[0].split(":")[0];
+            port = Integer.parseInt(CLUSTER_HOSTS[0].split(":")[1]);
+        } else {
+            host = STANDALONE_HOSTS[0].split(":")[0];
+            port = Integer.parseInt(STANDALONE_HOSTS[0].split(":")[1]);
+        }
+
+        glide.api.models.pool.ClientPoolConfig poolCfg =
+                glide.api.models.pool.ClientPoolConfig.builder()
+                        .maxSize(2)
+                        .minIdle(1)
+                        .acquireTimeout(Duration.ofSeconds(10))
+                        .clientConfig(
+                                GlideClientConfiguration.builder()
+                                        .address(NodeAddress.builder().host(host).port(port).build())
+                                        .requestTimeout(5000)
+                                        .build())
+                        .build();
+
+        glide.api.models.pool.ClientPool pool = glide.api.models.pool.ClientPool.create(poolCfg);
+        Thread.sleep(3000);
+
+        try (glide.api.models.pool.PooledGlideClient pooledClient =
+                pool.acquire().get(10, TimeUnit.SECONDS)) {
+            // PUBLISH to a channel — just verify no crash, don't need a subscriber
+            String channel = testKey(clusterMode, "pool-pub-channel");
+            pooledClient.unwrap().publish("test-message", channel).get(5, TimeUnit.SECONDS);
+        }
+
+        pool.close();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
     // Database State (Valkey 9+ only, standalone)
     // ═══════════════════════════════════════════════════════════════════════════════
 
