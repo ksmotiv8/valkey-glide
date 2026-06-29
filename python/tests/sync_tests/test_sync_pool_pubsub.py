@@ -27,13 +27,24 @@ def get_config(request) -> GlideClientConfiguration:
 class TestPoolPubSub:
     """PubSub tests with pooled clients under concurrent access."""
 
+    @staticmethod
+    def _wait_for_pool_ready(pool, timeout=30):
+        """Poll until pool has at least 1 idle client ready."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            metrics = pool.metrics()
+            if metrics.get("idle", 0) >= 1:
+                return
+            time.sleep(0.5)
+        raise TimeoutError(f"Pool not ready within {timeout}s: {pool.metrics()}")
+
     def test_publish_from_pool(self, request):
         """Pool clients can publish messages."""
         config = get_config(request)
         pool = ClientPool(
             config, PoolConfig(max_size=3, min_idle=1, acquire_timeout_s=15.0)
         )
-        time.sleep(5)  # Allow warmup (CI can be slow)
+        self._wait_for_pool_ready(pool)
 
         channel = f"test-channel-{uuid.uuid4().hex[:8]}"
         try:
@@ -51,7 +62,7 @@ class TestPoolPubSub:
         pool = ClientPool(
             config, PoolConfig(max_size=4, min_idle=2, acquire_timeout_s=15.0)
         )
-        time.sleep(5)  # Allow warmup (CI can be slow)
+        self._wait_for_pool_ready(pool)
 
         channel = f"concurrent-pub-{uuid.uuid4().hex[:8]}"
         num_threads = 4
@@ -89,7 +100,7 @@ class TestPoolPubSub:
         pool = ClientPool(
             config, PoolConfig(max_size=3, min_idle=1, acquire_timeout_s=15.0)
         )
-        time.sleep(5)  # Allow warmup (CI can be slow)
+        self._wait_for_pool_ready(pool)
 
         channel = f"sub-test-{uuid.uuid4().hex[:8]}"
         received_messages = []
