@@ -70,7 +70,9 @@ class TestAsyncClientPool:
         """Create pool, acquire client, execute commands, release, close."""
         config = _get_pool_client_config(cluster_mode)
         pool = AsyncClientPool(config, PoolConfig(max_size=3, min_idle=1))
-        await asyncio.sleep(3)  # Wait for pool warmup
+        deadline = asyncio.get_event_loop().time() + 30
+        while pool.idle_count < 1 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
 
         try:
             assert pool.idle_count >= 1
@@ -89,7 +91,9 @@ class TestAsyncClientPool:
         """Borrow client from pool, execute commands, auto-release."""
         config = _get_pool_client_config(cluster_mode)
         pool = AsyncClientPool(config, PoolConfig(max_size=3, min_idle=1))
-        await asyncio.sleep(3)  # Wait for pool warmup
+        deadline = asyncio.get_event_loop().time() + 30
+        while pool.idle_count < 1 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
 
         try:
             async with pool.borrow() as client:
@@ -106,7 +110,9 @@ class TestAsyncClientPool:
         """LIFO: same client_id returned after release."""
         config = _get_pool_client_config(cluster_mode)
         pool = AsyncClientPool(config, PoolConfig(max_size=3, min_idle=1))
-        await asyncio.sleep(3)  # Wait for pool warmup
+        deadline = asyncio.get_event_loop().time() + 30
+        while pool.idle_count < 1 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
 
         try:
             id1 = await pool.acquire()
@@ -125,7 +131,9 @@ class TestAsyncClientPool:
         """Metrics reflect pool state."""
         config = _get_pool_client_config(cluster_mode)
         pool = AsyncClientPool(config, PoolConfig(max_size=3, min_idle=2))
-        await asyncio.sleep(3)  # Wait for pool warmup
+        deadline = asyncio.get_event_loop().time() + 30
+        while pool.idle_count < 1 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
 
         try:
             assert pool.idle_count >= 1
@@ -138,7 +146,9 @@ class TestAsyncClientPool:
         """Timeout when pool is exhausted."""
         config = _get_pool_client_config(cluster_mode)
         pool = AsyncClientPool(config, PoolConfig(max_size=1, min_idle=1))
-        await asyncio.sleep(3)  # Wait for pool warmup
+        deadline = asyncio.get_event_loop().time() + 30
+        while pool.idle_count < 1 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
 
         try:
             # Acquire the only client
@@ -157,7 +167,9 @@ class TestAsyncClientPool:
         """Multiple tasks borrow/release concurrently."""
         config = _get_pool_client_config(cluster_mode)
         pool = AsyncClientPool(config, PoolConfig(max_size=4, min_idle=4))
-        await asyncio.sleep(3)  # Wait for pool warmup
+        deadline = asyncio.get_event_loop().time() + 30
+        while pool.idle_count < 1 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
 
         try:
             errors = []
@@ -185,7 +197,9 @@ class TestAsyncClientPool:
         """Closed pool rejects acquire."""
         config = _get_pool_client_config(cluster_mode)
         pool = AsyncClientPool(config, PoolConfig(max_size=2, min_idle=1))
-        await asyncio.sleep(3)  # Wait for pool warmup
+        deadline = asyncio.get_event_loop().time() + 30
+        while pool.idle_count < 1 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
 
         pool.close()
 

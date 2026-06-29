@@ -41,7 +41,9 @@ class TestPoolBenchmark:
     async def pool(self):
         config = get_config()
         p = AsyncClientPool(config, PoolConfig(max_size=8, min_idle=4))
-        await asyncio.sleep(4)
+        deadline = asyncio.get_event_loop().time() + 30
+        while p.idle_count < 1 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
         yield p
         p.close()
 
@@ -111,7 +113,9 @@ class TestPoolBenchmark:
         """
         config = get_config()
         pool = AsyncClientPool(config, PoolConfig(max_size=4, min_idle=2))
-        await asyncio.sleep(3)
+        deadline = asyncio.get_event_loop().time() + 30
+        while pool.idle_count < 1 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
 
         iterations = 50
 

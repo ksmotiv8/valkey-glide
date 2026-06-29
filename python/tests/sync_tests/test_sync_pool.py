@@ -68,7 +68,9 @@ class TestClientPool:
         pool = ClientPool(
             config, PoolConfig(max_size=5, min_idle=1, acquire_timeout_s=10.0)
         )
-        time.sleep(3)
+        deadline = time.monotonic() + 30
+        while pool.metrics().get("idle", 0) < 1 and time.monotonic() < deadline:
+            time.sleep(0.5)
 
         try:
             metrics = pool.metrics()
@@ -85,7 +87,9 @@ class TestClientPool:
         pool = ClientPool(
             config, PoolConfig(max_size=5, min_idle=1, acquire_timeout_s=10.0)
         )
-        time.sleep(3)
+        deadline = time.monotonic() + 30
+        while pool.metrics().get("idle", 0) < 1 and time.monotonic() < deadline:
+            time.sleep(0.5)
 
         try:
             key = _make_key(cluster_mode, "borrow")
@@ -104,7 +108,9 @@ class TestClientPool:
         pool = ClientPool(
             config, PoolConfig(max_size=5, min_idle=1, acquire_timeout_s=10.0)
         )
-        time.sleep(3)
+        deadline = time.monotonic() + 30
+        while pool.metrics().get("idle", 0) < 1 and time.monotonic() < deadline:
+            time.sleep(0.5)
 
         try:
             id1 = pool.acquire()
@@ -132,7 +138,9 @@ class TestClientPool:
         pool = ClientPool(
             config, PoolConfig(max_size=5, min_idle=1, acquire_timeout_s=10.0)
         )
-        time.sleep(3)
+        deadline = time.monotonic() + 30
+        while pool.metrics().get("idle", 0) < 1 and time.monotonic() < deadline:
+            time.sleep(0.5)
 
         try:
             num_threads = 4
@@ -172,7 +180,9 @@ class TestClientPool:
         p = ClientPool(
             config, PoolConfig(max_size=1, min_idle=1, acquire_timeout_s=1.0)
         )
-        time.sleep(3)  # warmup
+        deadline = time.monotonic() + 30
+        while p.metrics().get("idle", 0) < 1 and time.monotonic() < deadline:
+            time.sleep(0.5)
 
         try:
             # Acquire the only client

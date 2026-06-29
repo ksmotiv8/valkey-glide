@@ -235,7 +235,10 @@ func TestPoolCreateAndMetrics(t *testing.T) {
 			})
 			defer pool.Close()
 
-			time.Sleep(3 * time.Second)
+			deadline := time.Now().Add(30 * time.Second)
+			for pool.IdleCount() < 1 && time.Now().Before(deadline) {
+				time.Sleep(500 * time.Millisecond)
+			}
 
 			assert.GreaterOrEqual(t, pool.IdleCount(), 1)
 			assert.GreaterOrEqual(t, pool.TotalCount(), 1)
@@ -254,7 +257,10 @@ func TestPoolAcquireAndCommands(t *testing.T) {
 			})
 			defer pool.Close()
 
-			time.Sleep(3 * time.Second)
+			deadline := time.Now().Add(30 * time.Second)
+			for pool.IdleCount() < 1 && time.Now().Before(deadline) {
+				time.Sleep(500 * time.Millisecond)
+			}
 
 			ctx := context.Background()
 			clientID, err := pool.Acquire(ctx)
@@ -289,7 +295,10 @@ func TestPoolReuse(t *testing.T) {
 			})
 			defer pool.Close()
 
-			time.Sleep(3 * time.Second)
+			deadline := time.Now().Add(30 * time.Second)
+			for pool.IdleCount() < 1 && time.Now().Before(deadline) {
+				time.Sleep(500 * time.Millisecond)
+			}
 
 			ctx := context.Background()
 			id1, _ := pool.Acquire(ctx)
@@ -315,7 +324,10 @@ func TestPoolExhaustionTimeout(t *testing.T) {
 			})
 			defer pool.Close()
 
-			time.Sleep(3 * time.Second)
+			deadline := time.Now().Add(30 * time.Second)
+			for pool.IdleCount() < 1 && time.Now().Before(deadline) {
+				time.Sleep(500 * time.Millisecond)
+			}
 
 			ctx := context.Background()
 			id1, _ := pool.Acquire(ctx)
@@ -340,7 +352,10 @@ func TestPoolConcurrentAccess(t *testing.T) {
 			})
 			defer pool.Close()
 
-			time.Sleep(4 * time.Second)
+			deadline := time.Now().Add(30 * time.Second)
+			for pool.IdleCount() < 1 && time.Now().Before(deadline) {
+				time.Sleep(500 * time.Millisecond)
+			}
 
 			ctx := context.Background()
 			var wg sync.WaitGroup
@@ -393,7 +408,10 @@ func TestPoolCloseRejectsAcquire(t *testing.T) {
 				AcquireTimeout: 10 * time.Second,
 			})
 
-			time.Sleep(3 * time.Second)
+			deadline := time.Now().Add(30 * time.Second)
+			for pool.IdleCount() < 1 && time.Now().Before(deadline) {
+				time.Sleep(500 * time.Millisecond)
+			}
 			pool.Close()
 
 			ctx := context.Background()
@@ -1004,7 +1022,10 @@ func TestPoolPublish(t *testing.T) {
 			require.NoError(t, err)
 			defer pool.Close()
 
-			time.Sleep(3 * time.Second)
+			deadline := time.Now().Add(30 * time.Second)
+			for pool.IdleCount() < 1 && time.Now().Before(deadline) {
+				time.Sleep(500 * time.Millisecond)
+			}
 
 			ctx := context.Background()
 			clientID, err := pool.Acquire(ctx)

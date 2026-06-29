@@ -90,7 +90,10 @@ public class ClientPoolIntegrationTest {
     @ValueSource(booleans = {true, false})
     public void testPoolCreateAcquireRelease(boolean clusterMode) throws Exception {
         ClientPool pool = ClientPool.create(poolConfig(clusterMode));
-        Thread.sleep(3000); // Wait for min_idle warmup
+        long deadline = System.currentTimeMillis() + 30000;
+        while (pool.getIdleCount() < 1 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(500);
+        }
 
         assertTrue(pool.getIdleCount() >= 1, "Should have at least 1 idle client");
 
@@ -114,7 +117,10 @@ public class ClientPoolIntegrationTest {
     @ValueSource(booleans = {true, false})
     public void testPoolReuse(boolean clusterMode) throws Exception {
         ClientPool pool = ClientPool.create(poolConfig(clusterMode));
-        Thread.sleep(3000);
+        long deadline = System.currentTimeMillis() + 30000;
+        while (pool.getIdleCount() < 1 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(500);
+        }
 
         glide.api.models.pool.PooledGlideClient c1 = pool.acquire().get(10, TimeUnit.SECONDS);
         long id1 = c1.getClientId();
@@ -134,7 +140,10 @@ public class ClientPoolIntegrationTest {
     @ValueSource(booleans = {true, false})
     public void testPoolMetrics(boolean clusterMode) throws Exception {
         ClientPool pool = ClientPool.create(poolConfig(clusterMode));
-        Thread.sleep(3000);
+        long deadline = System.currentTimeMillis() + 30000;
+        while (pool.getIdleCount() < 1 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(500);
+        }
 
         assertTrue(pool.getIdleCount() >= 1);
         assertEquals(0, pool.getActiveCount());
@@ -144,8 +153,8 @@ public class ClientPoolIntegrationTest {
         pool.release(clientId);
 
         // Poll until async release completes (DISCARD + SELECT reset)
-        long deadline = System.currentTimeMillis() + 5000;
-        while (pool.getIdleCount() < 1 && System.currentTimeMillis() < deadline) {
+        long releaseDeadline = System.currentTimeMillis() + 5000;
+        while (pool.getIdleCount() < 1 && System.currentTimeMillis() < releaseDeadline) {
             Thread.sleep(50);
         }
 
@@ -158,7 +167,10 @@ public class ClientPoolIntegrationTest {
     @ValueSource(booleans = {true, false})
     public void testPoolCloseRejectsAcquire(boolean clusterMode) throws Exception {
         ClientPool pool = ClientPool.create(poolConfig(clusterMode));
-        Thread.sleep(2000);
+        long deadline = System.currentTimeMillis() + 30000;
+        while (pool.getIdleCount() < 1 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(500);
+        }
 
         pool.close();
 
@@ -170,7 +182,10 @@ public class ClientPoolIntegrationTest {
     @ValueSource(booleans = {true, false})
     public void testPoolConcurrentAccess(boolean clusterMode) throws Exception {
         ClientPool pool = ClientPool.create(poolConfig(clusterMode));
-        Thread.sleep(3000);
+        long deadline = System.currentTimeMillis() + 30000;
+        while (pool.getIdleCount() < 1 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(500);
+        }
 
         int numThreads = 4;
         java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(numThreads);
@@ -249,7 +264,10 @@ public class ClientPoolIntegrationTest {
         }
 
         ClientPool pool = ClientPool.create(exhaustConfig);
-        Thread.sleep(3000);
+        long deadline = System.currentTimeMillis() + 30000;
+        while (pool.getIdleCount() < 1 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(500);
+        }
 
         // Acquire the only client
         glide.api.models.pool.PooledGlideClient held = pool.acquire().get(10, TimeUnit.SECONDS);

@@ -179,7 +179,9 @@ class TestAsyncFreeThreading:
         """
         config = get_standalone_config()
         pool = AsyncClientPool(config, PoolConfig(max_size=8, min_idle=4))
-        await asyncio.sleep(4)  # Wait for min_idle warmup
+        deadline = asyncio.get_event_loop().time() + 30
+        while pool.idle_count < 1 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
 
         num_tasks = 16
         ops_per_task = 50
@@ -220,7 +222,9 @@ class TestAsyncFreeThreading:
         """
         config = get_standalone_config()
         pool = AsyncClientPool(config, PoolConfig(max_size=8, min_idle=4))
-        await asyncio.sleep(4)  # Wait for min_idle warmup
+        deadline = asyncio.get_event_loop().time() + 30
+        while pool.idle_count < 1 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
 
         num_tasks = 16
         cycles_per_task = 100
@@ -249,7 +253,9 @@ class TestAsyncFreeThreading:
         """
         config = get_standalone_config()
         pool = AsyncClientPool(config, PoolConfig(max_size=8, min_idle=4))
-        await asyncio.sleep(4)  # Wait for min_idle warmup
+        deadline = asyncio.get_event_loop().time() + 30
+        while pool.idle_count < 1 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
 
         num_tasks = 8
         ops_per_task = 100
@@ -284,7 +290,9 @@ class TestAsyncFreeThreading:
         """
         config = get_standalone_config()
         pool = AsyncClientPool(config, PoolConfig(max_size=8, min_idle=4))
-        await asyncio.sleep(4)  # Wait for min_idle warmup
+        deadline = asyncio.get_event_loop().time() + 30
+        while pool.idle_count < 1 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
 
         stop_event = asyncio.Event()
         errors = []
