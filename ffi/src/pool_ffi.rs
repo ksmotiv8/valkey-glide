@@ -124,10 +124,22 @@ pub unsafe extern "C" fn glide_pool_create(
     // Parse database_id from connection request for state reset on release
     let configured_database_id = {
         use protobuf::Message as _;
-        connection_request::ConnectionRequest::parse_from_bytes(&connection_request)
-            .ok()
-            .and_then(|req| {
-                let db = req.database_id;
+        let req = connection_request::ConnectionRequest::parse_from_bytes(&connection_request);
+        if let Ok(ref r) = req {
+            // Reject pubsub subscriptions in pool config — pool state reset doesn't
+            // handle UNSUBSCRIBE, so connections would be stuck in subscription mode.
+            if r.pubsub_subscriptions.is_some() {
+                logger_core::log_error(
+                    "pool",
+                    "Cannot create pool with pubsub subscriptions in client config. \
+                     Use the main client's pubsub API instead.",
+                );
+                return -3;
+            }
+        }
+        req.ok()
+            .and_then(|r| {
+                let db = r.database_id;
                 if db != 0 { Some(db) } else { None }
             })
             .unwrap_or(0)

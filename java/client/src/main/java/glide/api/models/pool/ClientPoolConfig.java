@@ -36,5 +36,10 @@ public class ClientPoolConfig {
         if (maxSize < 1) throw new IllegalArgumentException("maxSize must be >= 1");
         if (minIdle > maxSize) throw new IllegalArgumentException("minIdle must be <= maxSize");
         if (clientConfig == null) throw new IllegalArgumentException("clientConfig is required");
+        if (clientConfig.getSubscriptionConfiguration() != null) {
+            throw new IllegalArgumentException(
+                    "Pool clients cannot have pubsub subscriptions configured. "
+                            + "Use the main client's pubsub API for subscriptions.");
+        }
     }
 }

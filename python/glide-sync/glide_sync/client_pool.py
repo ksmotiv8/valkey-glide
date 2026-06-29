@@ -82,6 +82,13 @@ class ClientPool:
         client_config: BaseClientConfiguration,
         pool_config: Optional[PoolConfig] = None,
     ):
+        # Reject pubsub subscriptions — pool state reset doesn't UNSUBSCRIBE
+        if hasattr(client_config, "pubsub_subscriptions") and client_config.pubsub_subscriptions:
+            raise ValueError(
+                "Pool clients cannot have pubsub subscriptions configured. "
+                "Use the main client's pubsub API for subscriptions."
+            )
+
         ffi_instance = _GlideFFI()
         self._ffi = ffi_instance.ffi
         self._lib = ffi_instance.lib
