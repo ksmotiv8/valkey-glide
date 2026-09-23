@@ -1,0 +1,39 @@
+name: mo-eval suite
+on:
+  workflow_dispatch:
+    inputs:
+      arms:
+        description: Model routes to evaluate, space-separated
+        default: "none"
+      harnesses:
+        description: Harnesses (mo, cc, pi, strands)
+        default: "cc strands"
+      history:
+        default: "300"
+      candidates:
+        default: "12"
+      dry_run:
+        default: "true"
+permissions:
+  contents: read
+  pull-requests: read
+  id-token: write
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: protoc for glide-core build
+        run: sudo apt-get install -y --no-install-recommends protobuf-compiler
+        shell: bash
+      - uses: momentohq/mo-eval-action@3d9ab89ef27549552a81405dd4bdf6522d9f55c9 # v1.4.0
+        with:
+          service: https://zxui7nt7fztoox227b3piwf5jm0lumyg.lambda-url.us-west-2.on.aws
+          arms: ${{ inputs.arms }}
+          harnesses: ${{ inputs.harnesses }}
+          history: ${{ inputs.history }}
+          candidates: ${{ inputs.candidates }}
+          dry-run: ${{ inputs.dry_run }}
