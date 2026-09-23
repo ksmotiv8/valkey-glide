@@ -1,0 +1,5 @@
+language = "rust"
+test_command = "cargo test"
+worker_image = "rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e"
+# Fork: merged pull requests are the record of the upstream repository.
+repo = "valkey-io/valkey-glide"
